@@ -38,6 +38,15 @@ func CreateServer() *Server {
 		}
 		fmt.Fprintf(w, "Heading set to %s", heading)
 	})
+	// Health check endpoint to verify the server is running
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("OK"))
+	})
 	return &Server{
 		HttpServer: http.Server{
 			Addr:    ":8080",
