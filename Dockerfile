@@ -21,8 +21,18 @@ COPY . .
 # Build the main package only — using `./...` with `-o` pointing to a file fails when multiple packages are selected
 RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o /out/antenna-rotator-server .
 
-# Final stage (minimal runtime)
-FROM gcr.io/distroless/static
+# Final stage (include runtime libs like libusb)
+FROM debian:bookworm-slim
+# Install the runtime libusb package and certificates
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends \
+		libusb-1.0-0 \
+		ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /out/antenna-rotator-server /usr/local/bin/antenna-rotator-server
+# Create non-root user and set ownership
+RUN groupadd -r app && useradd -r -g app app && chown app:app /usr/local/bin/antenna-rotator-server
+USER app:app
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/antenna-rotator-server"]
