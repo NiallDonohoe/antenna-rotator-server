@@ -12,11 +12,13 @@ type Server struct {
 
 func CreateServer() *Server {
 	mux := http.NewServeMux()
-	// Initialize the rotator controller (replace with your device's VID and PID)
-	rotator, err := controller.NewRotatorController(0x1234, 0x5678)
+	// Initialize the rotator controller (uses the first available serial port)
+	rotator, err := controller.NewRotatorController()
 	if err != nil {
 		fmt.Println("Error initializing rotator controller:", err)
 	}
+
+	// Endpoint to set the rotator heading
 	mux.HandleFunc("/set-heading", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -38,6 +40,24 @@ func CreateServer() *Server {
 		}
 		fmt.Fprintf(w, "Heading set to %s", heading)
 	})
+	// Endpoint to get the rotator heading
+	mux.HandleFunc("/get-heading", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if rotator == nil {
+			http.Error(w, "Rotator controller not initialized", http.StatusInternalServerError)
+			return
+		}
+		heading, err := rotator.GetHeading()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprintf(w, "Heading is now set to %s", heading)
+	})
+
 	// Health check endpoint to verify the server is running
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
