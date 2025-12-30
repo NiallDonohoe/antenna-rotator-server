@@ -3,36 +3,61 @@ package controller
 import (
 	"fmt"
 
-	"github.com/google/gousb"
+	"go.bug.st/serial"
 )
 
 type RotatorController struct {
-	ctx    *gousb.Context
-	device *gousb.Device
+	port    serial.Port
+	heading string
 }
 
-func NewRotatorController(vid, pid int) (*RotatorController, error) {
-	ctx := gousb.NewContext()
-	dev, err := ctx.OpenDeviceWithVIDPID(gousb.ID(vid), gousb.ID(pid))
+func NewRotatorController() (*RotatorController, error) {
+	// Fallback: auto-detect first available port
+	ports, err := serial.GetPortsList()
 	if err != nil {
-		ctx.Close()
-		return nil, fmt.Errorf("could not open USB device: %v", err)
+		return nil, fmt.Errorf("could not list serial ports: %v", err)
 	}
-	return &RotatorController{ctx: ctx, device: dev}, nil
+	if len(ports) == 0 {
+		return nil, fmt.Errorf("no serial ports found")
+	}
+	// Select the first available port by default
+	portName := ports[0]
+	mode := &serial.Mode{BaudRate: 9600}
+	p, err := serial.Open(portName, mode)
+	if err != nil {
+		return nil, fmt.Errorf("could not open serial port %s: %v", portName, err)
+	}
+	return &RotatorController{port: p}, nil
 }
 
 func (rc *RotatorController) SetHeading(heading string) error {
-	// Convert heading to bytes and send to device
-	// This is a placeholder; actual implementation depends on your device protocol
-	data := []byte(heading)
-	_, err := rc.device.Control(0x40, 0x01, 0, 0, data)
-	if err != nil {
-		return fmt.Errorf("failed to send heading: %v", err)
+	if rc.port != nil {
+		data := []byte(heading)
+		_, err := rc.port.Write(data)
+		if err != nil {
+			return fmt.Errorf("failed to send heading: %v", err)
+		}
+		return nil
 	}
+	// Simulation mode: store heading locally
+	rc.heading = heading
 	return nil
 }
 
+func (rc *RotatorController) GetHeading() (string, error) {
+	if rc.port != nil {
+		// Placeholder; implement reading from the device if supported
+		return "180", nil
+	}
+	// Return simulated heading (default to "180")
+	if rc.heading == "" {
+		return "180", nil
+	}
+	return rc.heading, nil
+}
+
 func (rc *RotatorController) Close() {
-	rc.device.Close()
-	rc.ctx.Close()
+	if rc.port != nil {
+		rc.port.Close()
+	}
 }
