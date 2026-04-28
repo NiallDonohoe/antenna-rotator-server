@@ -1,0 +1,177 @@
+openapi: 3.0.3
+info:
+  title: Antenna Rotator Server
+  version: "1.0.0"
+  description: |
+    HTTP API for controlling a serial-attached antenna rotator (Prosistel
+    protocol). Use this Swagger UI to read or set the antenna heading,
+    stop in-progress rotation, and inspect the available serial ports.
+
+    When no rotator is attached, the server runs in **simulation mode** and
+    keeps the heading in memory so the API remains usable for testing.
+servers:
+  - url: /
+    description: This server
+tags:
+  - name: rotator
+    description: Rotator control endpoints
+  - name: system
+    description: Health and diagnostics
+paths:
+  /set-heading:
+    post:
+      tags: [rotator]
+      summary: Set the antenna heading
+      description: Rotate the antenna to the supplied azimuth (0–359 degrees).
+      parameters:
+        - in: query
+          name: heading
+          required: true
+          description: Target azimuth in degrees (0–359).
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 359
+            example: 180
+      responses:
+        "200":
+          description: Heading accepted and command dispatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeadingResponse"
+              example:
+                heading: 180
+                status: set
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /get-heading:
+    get:
+      tags: [rotator]
+      summary: Read the current antenna heading
+      responses:
+        "200":
+          description: Current azimuth in degrees.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeadingResponse"
+              example:
+                heading: 180
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /stop:
+    post:
+      tags: [rotator]
+      summary: Stop any in-progress rotation
+      responses:
+        "200":
+          description: Stop command dispatched.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StopResponse"
+              example:
+                status: stopped
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /list-ports:
+    get:
+      tags: [system]
+      summary: List available serial ports
+      description: Returns every serial port the host currently exposes.
+      responses:
+        "200":
+          description: List of detected serial ports.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PortsResponse"
+              example:
+                ports: ["COM3", "COM4"]
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /healthz:
+    get:
+      tags: [system]
+      summary: Liveness probe
+      responses:
+        "200":
+          description: Server is running.
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: OK
+components:
+  schemas:
+    HeadingResponse:
+      type: object
+      required: [heading]
+      properties:
+        heading:
+          type: integer
+          minimum: 0
+          maximum: 359
+          description: Azimuth in degrees.
+        status:
+          type: string
+          description: Action acknowledgement (only present on writes).
+          enum: [set]
+    StopResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [stopped]
+    PortsResponse:
+      type: object
+      required: [ports]
+      properties:
+        ports:
+          type: array
+          items:
+            type: string
+          description: Serial port identifiers (e.g. `COM3`, `/dev/ttyUSB0`).
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+  responses:
+    BadRequest:
+      description: Invalid request (e.g. heading out of range or missing).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "heading 400 out of range: must be 0–359"
+    MethodNotAllowed:
+      description: HTTP method is not supported on this route.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: Method not allowed
+    ServerError:
+      description: Internal server error (rotator unavailable, serial I/O failure, etc.).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: Rotator controller not initialized
