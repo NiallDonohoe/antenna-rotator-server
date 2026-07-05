@@ -32,7 +32,30 @@ Commercial, remotely controlled rotator systems are often expensive and tightly 
 ```bash
 make build
 ROTATOR_PORT=/dev/ttyUSB0 ./bin/antenna-rotator-server   # Linux/macOS
-ROTATOR_PORT=COM3 ./bin/antenna-rotator-server           # Windows
+```
+
+### Windows
+
+Run the native Windows binary directly against a COM port — this is the recommended way to run on Windows, since Docker Desktop's Linux VM can't see COM ports without extra USB-passthrough tooling (`usbipd-win`).
+
+Cross-compile from Linux/macOS:
+```bash
+make build-windows
+```
+or build straight from Go on the Windows machine itself:
+```powershell
+go build -o antenna-rotator-server.exe .
+```
+
+Then run it:
+```powershell
+$env:ROTATOR_PORT = "COM3"
+.\antenna-rotator-server.exe
+```
+No hardware attached? Run against the simulated rotator instead:
+```powershell
+$env:SIMULATION = "true"
+.\antenna-rotator-server.exe
 ```
 
 The server listens on port `8080` by default. Open <http://localhost:8080/swagger/> to use the Swagger UI.
@@ -168,8 +191,9 @@ Serial access is fully serialized (concurrent HTTP requests can't interleave com
 ## Development
 
 ```bash
-make build     # build the binary into ./bin (version-stamped from git)
-make test      # go test -race ./...
+make build         # build the binary into ./bin (version-stamped from git)
+make build-windows # cross-compile a Windows .exe into ./bin
+make test          # go test -race ./...
 make vet       # go vet ./...
 make lint      # golangci-lint run
 make run-sim   # build and run in simulation mode

@@ -5,7 +5,7 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 DOCKER_IMAGE ?= $(APP_NAME):latest
 
-.PHONY: all build build-linux test vet lint clean run-sim docker-build docker-buildx docker-push
+.PHONY: all build build-linux build-windows test vet lint clean run-sim docker-build docker-buildx docker-push
 
 all: build
 
@@ -16,6 +16,12 @@ build:
 build-linux:
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(BIN_DIR)/$(BINARY)-linux-amd64
+
+# Cross-compile a native Windows binary (talks to COM ports directly, no
+# Docker/USB-passthrough needed). Run it with: ROTATOR_PORT=COM3 ./bin/antenna-rotator-server-windows-amd64.exe
+build-windows:
+	@mkdir -p $(BIN_DIR)
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(BIN_DIR)/$(BINARY)-windows-amd64.exe
 
 test:
 	go test -race ./...
@@ -31,7 +37,7 @@ run-sim: build
 	SIMULATION=true ./$(BIN_DIR)/$(BINARY)
 
 clean:
-	rm -rf $(BIN_DIR) $(BINARY) $(BINARY)-linux-amd64
+	rm -rf $(BIN_DIR) $(BINARY) $(BINARY)-linux-amd64 $(BINARY)-windows-amd64.exe
 
 # Docker targets
 docker-build:
