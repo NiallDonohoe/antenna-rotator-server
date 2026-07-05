@@ -25,16 +25,21 @@ type ProtocolSpec struct {
 // protocols is the registry of supported rotator protocols.
 var protocols = []ProtocolSpec{
 	{
-		// Prosistel "D" protocol. The "1" addresses controller #1
-		// (azimuth) on the Prosistel bus.
-		//   Set azimuth : AP1XXX\r → —
-		//   Get azimuth : AI1\r    → "+AXXX\r"
-		//   Stop        : AX1\r    → —
+		// Prosistel "D" protocol, per Hamlib's prosistel backend (the
+		// reference implementation used across ham radio rotator software).
+		// Every command is framed with a leading STX (0x02) and addresses an
+		// axis by a literal letter ("A" for azimuth) — there is no numeric
+		// bus address.
+		//   Set azimuth : \x02AG<deg>\r → "\x02A,?,<deg>,R\r"
+		//   Get azimuth : \x02A?\r      → "\x02A,?,<deg>,R\r"
+		//   Stop        : \x02AG997\r   → "\x02A,?,<deg>,R\r" (997 = soft/PWM
+		//                                 stop; 999 = fast/immediate stop)
+		// An unrecognised command gets "\x02A,?,E,<code>\r" back instead.
 		Name:           "prosistel",
-		SetHeadingFmt:  "AP1%03d\r",
-		GetHeadingCmd:  "AI1\r",
-		StopCmd:        "AX1\r",
-		AzimuthMarkers: []string{"+A", "+"},
+		SetHeadingFmt:  "\x02AG%d\r",
+		GetHeadingCmd:  "\x02A?\r",
+		StopCmd:        "\x02AG997\r",
+		AzimuthMarkers: []string{",?,"},
 	},
 	{
 		// Yaesu GS-232A/B command set, used by the G-450/G-650/G-800/

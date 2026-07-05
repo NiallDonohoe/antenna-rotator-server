@@ -160,11 +160,15 @@ The `rotator-controller` package speaks two serial protocols (both 8N1), selecte
 
 ### Prosistel (`ROTATOR_PROTOCOL=prosistel`, the default)
 
-| Action          | Command sent     | Response       |
-|-----------------|------------------|----------------|
-| Set azimuth     | `AP1XXX\r`       | —              |
-| Read azimuth    | `AI1\r`          | `+AXXX\r`      |
-| Stop rotation   | `AX1\r`          | —              |
+Prosistel "D" protocol, matching [Hamlib's prosistel backend](https://github.com/Hamlib/Hamlib/tree/master/rotators/prosistel) — the reference implementation used across ham radio rotator software. Every command is framed with a leading STX (`\x02`) and addresses the azimuth axis by the literal letter `A` (there is no numeric bus address).
+
+| Action          | Command sent       | Response                |
+|-----------------|--------------------|--------------------------|
+| Set azimuth     | `\x02AG<deg>\r`    | `\x02A,?,<deg>,R\r`      |
+| Read azimuth    | `\x02A?\r`         | `\x02A,?,<deg>,R\r`      |
+| Stop rotation   | `\x02AG997\r`      | `\x02A,?,<deg>,R\r`      |
+
+997 is a "soft" (PWM) stop; some controllers also support 999 for an immediate/fast stop. An unrecognised command gets `\x02A,?,E,<code>\r` back instead of a heading.
 
 ### Yaesu GS-232A/B (`ROTATOR_PROTOCOL=yaesu`)
 

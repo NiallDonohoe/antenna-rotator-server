@@ -68,9 +68,9 @@ func TestSetHeadingCmd(t *testing.T) {
 		deg      int
 		want     string
 	}{
-		{"prosistel", 90, "AP1090\r"},
-		{"prosistel", 0, "AP1000\r"},
-		{"prosistel", 359, "AP1359\r"},
+		{"prosistel", 90, "\x02AG90\r"},
+		{"prosistel", 0, "\x02AG0\r"},
+		{"prosistel", 359, "\x02AG359\r"},
 		{"yaesu", 90, "M090\r"},
 		{"yaesu", 5, "M005\r"},
 	}
@@ -89,15 +89,14 @@ func TestParseHeading(t *testing.T) {
 		want     int
 		wantErr  bool
 	}{
-		// Prosistel: "+AXXX"
-		{"prosistel", "+A090", 90, false},
-		{"prosistel", "+A000", 0, false},
-		{"prosistel", "+A359", 359, false},
-		{"prosistel", "090", 90, false},
-		{"prosistel", "+090", 90, false},
-		{"prosistel", "  +A180  ", 180, false},
+		// Prosistel: "\x02A,?,XXX,R" (success) or "\x02A,?,E,code" (error)
+		{"prosistel", "\x02A,?,090,R", 90, false},
+		{"prosistel", "\x02A,?,000,R", 0, false},
+		{"prosistel", "\x02A,?,359,R", 359, false},
+		{"prosistel", "\x02A,?,1000,R", 1000, false}, // width isn't fixed
+		{"prosistel", "  \x02A,?,180,R  ", 180, false},
 		{"prosistel", "", 0, true},
-		{"prosistel", "+Axyz", 0, true},
+		{"prosistel", "\x02A,?,E,00003", 0, true},
 
 		// Yaesu GS-232A: "+0XXX"
 		{"yaesu", "+0090", 90, false},

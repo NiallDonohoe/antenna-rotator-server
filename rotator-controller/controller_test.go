@@ -158,8 +158,8 @@ func TestSetHeadingWritesCommand(t *testing.T) {
 	if err := rc.SetHeading(90); err != nil {
 		t.Fatalf("SetHeading: %v", err)
 	}
-	if got := fp.writtenString(); got != "AP1090\r" {
-		t.Errorf("wrote %q, want %q", got, "AP1090\r")
+	if got := fp.writtenString(); got != "\x02AG90\r" {
+		t.Errorf("wrote %q, want %q", got, "\x02AG90\r")
 	}
 	if err := rc.SetHeading(400); err == nil {
 		t.Error("SetHeading(400): expected validation error")
@@ -168,7 +168,7 @@ func TestSetHeadingWritesCommand(t *testing.T) {
 
 func TestGetHeadingParsesResponse(t *testing.T) {
 	fp := newFakePort()
-	fp.responses["AI1\r"] = []byte("+A123\r")
+	fp.responses["\x02A?\r"] = []byte("\x02A,?,123,R\r")
 	rc := newFakeController("prosistel", fp)
 	h, err := rc.GetHeading()
 	if err != nil {
@@ -181,8 +181,8 @@ func TestGetHeadingParsesResponse(t *testing.T) {
 
 func TestGetHeadingFlushesStaleBytes(t *testing.T) {
 	fp := newFakePort()
-	fp.pending = []byte("+A007\r") // leftover reply from an earlier command
-	fp.responses["AI1\r"] = []byte("+A123\r")
+	fp.pending = []byte("\x02A,?,007,R\r") // leftover reply from an earlier command
+	fp.responses["\x02A?\r"] = []byte("\x02A,?,123,R\r")
 	rc := newFakeController("prosistel", fp)
 	h, err := rc.GetHeading()
 	if err != nil {
@@ -211,8 +211,8 @@ func TestStopWritesCommand(t *testing.T) {
 	if err := rc.Stop(); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if got := fp.writtenString(); got != "AX1\r" {
-		t.Errorf("wrote %q, want %q", got, "AX1\r")
+	if got := fp.writtenString(); got != "\x02AG997\r" {
+		t.Errorf("wrote %q, want %q", got, "\x02AG997\r")
 	}
 }
 
@@ -220,7 +220,7 @@ func TestReconnectAfterPortFailure(t *testing.T) {
 	dead := newFakePort()
 	dead.failNext = 1000 // port has gone away; every write fails
 	replacement := newFakePort()
-	replacement.responses["AI1\r"] = []byte("+A045\r")
+	replacement.responses["\x02A?\r"] = []byte("\x02A,?,045,R\r")
 
 	opened := 0
 	rc := &RotatorController{
