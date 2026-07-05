@@ -27,6 +27,8 @@ type Rotator interface {
 	Mode() string
 	Protocol() string
 	Connected() bool
+	Offset() int
+	SetOffset(offset int)
 }
 
 type Config struct {
@@ -54,6 +56,11 @@ type stopBody struct {
 
 type portsBody struct {
 	Ports []string `json:"ports"`
+}
+
+type offsetBody struct {
+	Offset int    `json:"offset"`
+	Status string `json:"status,omitempty"`
 }
 
 type healthBody struct {
@@ -153,6 +160,20 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config) {
 		writeJSON(w, http.StatusOK, stopBody{Status: "stopped"})
 	})
 
+	handle("GET /offset", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, offsetBody{Offset: rotator.Offset()})
+	})
+
+	handle("POST /offset", func(w http.ResponseWriter, r *http.Request) {
+		off, err := parseOffsetRequest(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		rotator.SetOffset(off)
+		writeJSON(w, http.StatusOK, offsetBody{Offset: rotator.Offset(), Status: "set"})
+	})
+
 	handle("GET /list-ports", func(w http.ResponseWriter, r *http.Request) {
 		ports, err := controller.ListAvailablePorts()
 		if err != nil {
@@ -200,6 +221,33 @@ func parseHeadingRequest(r *http.Request) (int, error) {
 		return *body.Heading, nil
 	}
 	return 0, fmt.Errorf("missing heading: pass ?heading=N or a JSON body {\"heading\": N}")
+}
+
+// parseOffsetRequest accepts the calibration offset either as an `?offset=`
+// query parameter or as a JSON body `{"offset": N}`. Any integer is valid;
+// it is normalised modulo 360 by the controller.
+func parseOffsetRequest(r *http.Request) (int, error) {
+	if q := r.URL.Query().Get("offset"); q != "" {
+		off, err := strconv.Atoi(strings.TrimSpace(q))
+		if err != nil {
+			return 0, fmt.Errorf("invalid offset %q: must be an integer", q)
+		}
+		return off, nil
+	}
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		var body struct {
+			Offset *int `json:"offset"`
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1024))
+		if err := dec.Decode(&body); err != nil {
+			return 0, fmt.Errorf("invalid JSON body: %v", err)
+		}
+		if body.Offset == nil {
+			return 0, fmt.Errorf("JSON body missing \"offset\" field")
+		}
+		return *body.Offset, nil
+	}
+	return 0, fmt.Errorf("missing offset: pass ?offset=N or a JSON body {\"offset\": N}")
 }
 
 // registerDocsRoutes wires up the Swagger UI page, the OpenAPI spec, and a

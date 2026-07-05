@@ -39,7 +39,8 @@ type RotatorController struct {
 	simulated bool
 	portName  string
 	port      serial.Port // nil when disconnected (hardware mode) or simulated
-	heading   int          // simulation mode only
+	heading   int          // simulation mode only; otherwise the last-read raw value is not cached
+	offset    int          // calibration offset: real-world heading = raw rotator heading + offset
 	proto     ProtocolSpec // zero value in simulation mode
 
 	// open is swappable so tests can inject a fake port.
@@ -133,35 +134,71 @@ func (rc *RotatorController) Connected() bool {
 	return rc.port != nil
 }
 
-// SetHeading rotates to the given heading (0–359 degrees).
+// SetHeading rotates to the given real-world heading (0–359 degrees). The
+// calibration offset (see SetOffset) is subtracted before the raw command is
+// sent, so the rotator ends up pointing at the requested compass heading
+// even if its own zero point is mechanically misaligned.
 func (rc *RotatorController) SetHeading(deg int) error {
 	if deg < 0 || deg > 359 {
 		return fmt.Errorf("%w: %d out of range, must be 0–359", ErrInvalidHeading, deg)
 	}
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
+	raw := mod360(deg - rc.offset)
 	if rc.simulated {
-		rc.heading = deg
+		rc.heading = raw
 		return nil
 	}
-	if _, err := rc.transactLocked(rc.proto.setHeadingCmd(deg), false); err != nil {
+	if _, err := rc.transactLocked(rc.proto.setHeadingCmd(raw), false); err != nil {
 		return fmt.Errorf("failed to send set-heading command: %v", err)
 	}
 	return nil
 }
 
-// GetHeading queries the controller for the current azimuth.
+// GetHeading queries the controller for the current azimuth and applies the
+// calibration offset to report a real-world heading.
 func (rc *RotatorController) GetHeading() (int, error) {
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
 	if rc.simulated {
-		return rc.heading, nil
+		return mod360(rc.heading + rc.offset), nil
 	}
 	resp, err := rc.transactLocked(rc.proto.GetHeadingCmd, true)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read heading: %v", err)
 	}
-	return rc.proto.parseHeading(resp)
+	raw, err := rc.proto.parseHeading(resp)
+	if err != nil {
+		return 0, err
+	}
+	return mod360(raw + rc.offset), nil
+}
+
+// Offset reports the calibration offset currently applied.
+func (rc *RotatorController) Offset() int {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.offset
+}
+
+// SetOffset sets the calibration offset applied to all subsequent
+// SetHeading/GetHeading calls: real-world heading = raw rotator heading +
+// offset. Any integer is accepted and normalised modulo 360, so it can be
+// tuned live (e.g. via the HTTP API) while comparing the antenna's actual
+// physical heading to what the rotator reports.
+func (rc *RotatorController) SetOffset(offset int) {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	rc.offset = mod360(offset)
+}
+
+// mod360 normalises deg into the range [0, 360).
+func mod360(deg int) int {
+	deg %= 360
+	if deg < 0 {
+		deg += 360
+	}
+	return deg
 }
 
 // Stop halts any in-progress rotation.

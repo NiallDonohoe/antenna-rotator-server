@@ -50,6 +50,37 @@ func TestSimulationMode(t *testing.T) {
 	}
 }
 
+func TestHeadingOffsetRoundTrips(t *testing.T) {
+	rc := NewSimulationController()
+	rc.SetOffset(10)
+	if got := rc.Offset(); got != 10 {
+		t.Errorf("Offset(): got %d, want 10", got)
+	}
+
+	if err := rc.SetHeading(100); err != nil {
+		t.Fatalf("SetHeading: %v", err)
+	}
+	h, err := rc.GetHeading()
+	if err != nil {
+		t.Fatalf("GetHeading: %v", err)
+	}
+	if h != 100 {
+		t.Errorf("GetHeading with offset applied: got %d, want 100 (real-world heading should round-trip)", h)
+	}
+}
+
+func TestSetOffsetNormalisesModulo360(t *testing.T) {
+	rc := NewSimulationController()
+	rc.SetOffset(-10)
+	if got := rc.Offset(); got != 350 {
+		t.Errorf("Offset() after SetOffset(-10): got %d, want 350", got)
+	}
+	rc.SetOffset(370)
+	if got := rc.Offset(); got != 10 {
+		t.Errorf("Offset() after SetOffset(370): got %d, want 10", got)
+	}
+}
+
 func TestSimulationConcurrentAccess(t *testing.T) {
 	rc := NewSimulationController()
 	var wg sync.WaitGroup
@@ -163,6 +194,34 @@ func TestSetHeadingWritesCommand(t *testing.T) {
 	}
 	if err := rc.SetHeading(400); err == nil {
 		t.Error("SetHeading(400): expected validation error")
+	}
+}
+
+func TestSetHeadingSubtractsOffsetFromRawCommand(t *testing.T) {
+	fp := newFakePort()
+	rc := newFakeController("prosistel", fp)
+	rc.SetOffset(10)
+	// Desired real-world heading 5; raw command sent to the rotator should
+	// be mod360(5-10) = 355, wrapping around zero.
+	if err := rc.SetHeading(5); err != nil {
+		t.Fatalf("SetHeading: %v", err)
+	}
+	if got := fp.writtenString(); got != "\x02AG355\r" {
+		t.Errorf("wrote %q, want %q", got, "\x02AG355\r")
+	}
+}
+
+func TestGetHeadingAddsOffsetToRawReading(t *testing.T) {
+	fp := newFakePort()
+	fp.responses["\x02A?\r"] = []byte("\x02A,?,350,R\r")
+	rc := newFakeController("prosistel", fp)
+	rc.SetOffset(10)
+	h, err := rc.GetHeading()
+	if err != nil {
+		t.Fatalf("GetHeading: %v", err)
+	}
+	if h != 0 { // mod360(350+10) = 0
+		t.Errorf("got %d, want 0", h)
 	}
 }
 

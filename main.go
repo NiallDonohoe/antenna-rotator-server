@@ -70,14 +70,27 @@ func main() {
 //	ROTATOR_PORT=...      → open that serial port; failure aborts startup
 //	ROTATOR_PROTOCOL=...  → "prosistel" (default) or "yaesu" (GS-232A/B)
 //	ROTATOR_BAUD=...      → serial baud rate (default 9600)
+//	ROTATOR_HEADING_OFFSET=... → calibration offset in degrees, added to
+//	                             raw rotator readings (default 0)
 //
 // A hardware server must never silently pretend to work, so with neither
 // SIMULATION nor ROTATOR_PORT set startup fails with a hint listing the
 // ports it can see.
 func buildRotator() (*controller.RotatorController, error) {
+	offset := 0
+	if o := os.Getenv("ROTATOR_HEADING_OFFSET"); o != "" {
+		v, err := strconv.Atoi(strings.TrimSpace(o))
+		if err != nil {
+			return nil, fmt.Errorf("invalid ROTATOR_HEADING_OFFSET %q: must be an integer", o)
+		}
+		offset = v
+	}
+
 	if isTruthy(os.Getenv("SIMULATION")) {
 		slog.Warn("running in SIMULATION mode — no hardware will be driven")
-		return controller.NewSimulationController(), nil
+		rotator := controller.NewSimulationController()
+		rotator.SetOffset(offset)
+		return rotator, nil
 	}
 
 	portName := os.Getenv("ROTATOR_PORT")
@@ -103,7 +116,11 @@ func buildRotator() (*controller.RotatorController, error) {
 	if err != nil {
 		return nil, err
 	}
+	rotator.SetOffset(offset)
 	slog.Info("rotator controller connected", "port", portName, "protocol", rotator.Protocol())
+	if offset != 0 {
+		slog.Info("heading offset applied", "offset", offset)
+	}
 	return rotator, nil
 }
 

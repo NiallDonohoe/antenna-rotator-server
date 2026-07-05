@@ -164,6 +164,88 @@ func TestSetHeadingValidation(t *testing.T) {
 	}
 }
 
+func TestOffsetGetAndSet(t *testing.T) {
+	srv := newTestServer(t)
+
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/offset", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /offset: expected 200; got %d", rr.Code)
+	}
+	var got offsetBody
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("offset body not JSON: %v", err)
+	}
+	if got.Offset != 0 {
+		t.Fatalf("default offset: got %d, want 0", got.Offset)
+	}
+
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest("POST", "/offset?offset=15", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /offset: expected 200; got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("offset body not JSON: %v", err)
+	}
+	if got.Offset != 15 || got.Status != "set" {
+		t.Fatalf("POST /offset: got %+v, want {Offset:15 Status:set}", got)
+	}
+
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/offset", nil))
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("offset body not JSON: %v", err)
+	}
+	if got.Offset != 15 {
+		t.Fatalf("GET /offset after set: got %d, want 15", got.Offset)
+	}
+
+	// The offset affects heading calibration end-to-end: a rotator whose
+	// zero point is 15 degrees off should still report the requested
+	// real-world heading back.
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest("POST", "/set-heading?heading=100", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("set-heading: expected 200; got %d", rr.Code)
+	}
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/get-heading", nil))
+	var h headingBody
+	if err := json.Unmarshal(rr.Body.Bytes(), &h); err != nil {
+		t.Fatalf("get-heading body not JSON: %v", err)
+	}
+	if h.Heading != 100 {
+		t.Fatalf("get-heading with offset applied: got %d, want 100", h.Heading)
+	}
+}
+
+func TestOffsetJSONBodyNormalisesAndValidates(t *testing.T) {
+	srv := newTestServer(t)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/offset", strings.NewReader(`{"offset": -5}`))
+	req.Header.Set("Content-Type", "application/json")
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200; got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var got offsetBody
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("offset body not JSON: %v", err)
+	}
+	if got.Offset != 355 { // -5 normalised modulo 360
+		t.Fatalf("got offset=%d, want 355 (normalised -5)", got.Offset)
+	}
+
+	// Missing offset is a 400.
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest("POST", "/offset", nil))
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing offset; got %d", rr.Code)
+	}
+}
+
 func TestStop(t *testing.T) {
 	rr := dispatch(t, "POST", "/stop")
 	if rr.Code != http.StatusOK {
@@ -208,6 +290,8 @@ func (brokenRotator) Stop() error              { return fmt.Errorf("serial write
 func (brokenRotator) Mode() string             { return "hardware" }
 func (brokenRotator) Protocol() string         { return "prosistel" }
 func (brokenRotator) Connected() bool          { return false }
+func (brokenRotator) Offset() int              { return 0 }
+func (brokenRotator) SetOffset(int)            {}
 
 func TestSerialFailuresReturn502(t *testing.T) {
 	srv := New(Config{Rotator: brokenRotator{}})

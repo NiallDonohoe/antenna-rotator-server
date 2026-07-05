@@ -104,6 +104,66 @@ paths:
           $ref: "#/components/responses/MethodNotAllowed"
         "502":
           $ref: "#/components/responses/RotatorUnavailable"
+  /offset:
+    get:
+      tags: [rotator]
+      summary: Read the current calibration offset
+      description: |
+        Real-world heading = raw rotator heading + offset (mod 360). Useful
+        for correcting a mechanically misaligned mounting so that requested
+        headings point where you actually expect.
+      responses:
+        "200":
+          description: Current calibration offset in degrees.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OffsetResponse"
+              example:
+                offset: 15
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+    post:
+      tags: [rotator]
+      summary: Set the calibration offset
+      description: |
+        Applies to all subsequent set-heading/get-heading calls. Pass the
+        offset either as the `offset` query parameter or as a JSON body. Any
+        integer is accepted and normalised modulo 360; takes effect
+        immediately, with no hardware command sent.
+      parameters:
+        - in: query
+          name: offset
+          required: false
+          description: Calibration offset in degrees. Takes precedence over the body.
+          schema:
+            type: integer
+            example: 15
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [offset]
+              properties:
+                offset:
+                  type: integer
+                  example: 15
+      responses:
+        "200":
+          description: Offset applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OffsetResponse"
+              example:
+                offset: 15
+                status: set
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
   /list-ports:
     get:
       tags: [system]
@@ -165,6 +225,17 @@ components:
         status:
           type: string
           enum: [stopped]
+    OffsetResponse:
+      type: object
+      required: [offset]
+      properties:
+        offset:
+          type: integer
+          description: Calibration offset in degrees (real-world heading = raw + offset, mod 360).
+        status:
+          type: string
+          description: Action acknowledgement (only present on writes).
+          enum: [set]
     PortsResponse:
       type: object
       required: [ports]

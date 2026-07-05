@@ -76,6 +76,7 @@ All configuration is via environment variables:
 | `ROTATOR_PORT`     | —           | Serial port of the rotator (e.g. `/dev/ttyUSB0`, `COM3`). Required unless simulating. |
 | `ROTATOR_PROTOCOL` | `prosistel` | Rotator protocol: `prosistel` or `yaesu` (GS-232A/B).               |
 | `ROTATOR_BAUD`     | `9600`      | Serial baud rate (older GS-232A interfaces often use 1200–4800).    |
+| `ROTATOR_HEADING_OFFSET` | `0`   | Calibration offset in degrees, added to raw rotator readings (see [Calibration offset](#calibration-offset)). |
 | `SIMULATION`       | `false`     | `true` runs an in-memory rotator, no hardware needed.               |
 | `LISTEN_ADDR`      | `:8080`     | HTTP listen address.                                                |
 | `LOG_LEVEL`        | `info`      | `debug`, `info`, `warn`, or `error`.                                |
@@ -125,6 +126,8 @@ Canonical paths live under `/api/v1`; the unprefixed paths remain as aliases. Al
 | POST   | `/api/v1/set-heading` | Set the heading (`?heading=0..359` or JSON body)     |
 | GET    | `/api/v1/get-heading` | Read the current heading                             |
 | POST   | `/api/v1/stop`        | Stop in-progress rotation                            |
+| GET    | `/api/v1/offset`      | Read the current calibration offset                  |
+| POST   | `/api/v1/offset`      | Set the calibration offset (`?offset=N` or JSON body) |
 | GET    | `/api/v1/list-ports`  | List serial ports detected on the host               |
 | GET    | `/api/v1/healthz`     | Liveness probe with mode/connection/version info     |
 
@@ -143,6 +146,12 @@ curl http://localhost:8080/api/v1/get-heading
 curl -X POST http://localhost:8080/api/v1/stop
 # {"status":"stopped"}
 
+curl -X POST 'http://localhost:8080/api/v1/offset?offset=15'
+# {"offset":15,"status":"set"}
+
+curl http://localhost:8080/api/v1/offset
+# {"offset":15}
+
 curl http://localhost:8080/api/v1/list-ports
 # {"ports":["COM3","COM4"]}
 
@@ -151,6 +160,10 @@ curl http://localhost:8080/api/v1/healthz
 ```
 
 `healthz` always returns `200` while the process is alive; monitors should alert on `"mode":"simulation"` or `"connected":false` if they expect real hardware.
+
+### Calibration offset
+
+If the rotator is mechanically mounted so its own zero point doesn't line up with true heading (a common real-world install error), set `ROTATOR_HEADING_OFFSET` or `POST /api/v1/offset` so requested headings point where you actually expect: `real-world heading = raw rotator heading + offset (mod 360)`. It's applied to every `set-heading`/`get-heading` call, in both hardware and simulation mode, and can be tuned live via the API while comparing the antenna's actual physical heading to what it reports — no server restart or hardware command required, since it's a pure software translation layer.
 
 ---
 
