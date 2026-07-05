@@ -1,4 +1,7 @@
 # Antenna Rotator Server
+
+[![CI](https://github.com/NiallDonohoe/antenna-rotator-server/actions/workflows/ci.yml/badge.svg)](https://github.com/NiallDonohoe/antenna-rotator-server/actions/workflows/ci.yml)
+
 Go-based server that allows remote control of antenna rotators.
 
 ## Why rotate antennas?
@@ -7,19 +10,19 @@ Rotating a directional antenna (for example a Yagi or beam) is essential in amat
 ## How this project helps — simple, low-cost remote control
 Commercial, remotely controlled rotator systems are often expensive and tightly coupled to vendor hardware and GUIs. This project provides a lightweight, open solution that separates the control software from the hardware. By running a Go-based server (`rotator-server`) and using the `rotator-controller` package to talk to simple serial-based rotator controllers, you can:
 
-- Control rotators over the network (LAN or Internet) from any device or script
+- Control rotators over the network from any device or script
 - Integrate with satellite tracking or contesting automation without proprietary systems
 - Use inexpensive or home-built controllers instead of complex, proprietary remote boxes
-
-This removes the need to buy fully integrated, costly remote rotator systems and makes remote/automated control accessible and maintainable.
 
 ## Advantages
 - **Low cost:** works with simple serial controllers and avoids vendor lock-in
 - **Open & extensible:** integrate with homebrew hardware, existing apps, or scripts
 - **Networked control:** expose a standard API for remote control and automation
 - **Automation-friendly:** ideal for azimuth-only satellite tracking, scheduled direction changes, or contests
-- **Easier maintenance:** update software instead of replacing proprietary hardware
+- **Robust serial handling:** serialized port access, automatic reconnect after USB glitches, stale-byte flushing
 - **Built-in Swagger UI:** point a browser at the server and drive the API by hand
+
+> ⚠️ The API has **no authentication**. Only expose it on a trusted LAN, or put it behind a reverse proxy that adds TLS + auth if you need Internet access.
 
 ---
 
@@ -27,19 +30,35 @@ This removes the need to buy fully integrated, costly remote rotator systems and
 
 ### Run from source
 ```bash
-go build -o bin/antenna-rotator-server
-./bin/antenna-rotator-server
+make build
+ROTATOR_PORT=/dev/ttyUSB0 ./bin/antenna-rotator-server   # Linux/macOS
+ROTATOR_PORT=COM3 ./bin/antenna-rotator-server           # Windows
 ```
 
-The server listens on port `8080`. Open <http://localhost:8080/swagger/> to use the Swagger UI.
+The server listens on port `8080` by default. Open <http://localhost:8080/swagger/> to use the Swagger UI.
 
-If a serial port is attached, set it explicitly:
+No hardware attached? Run against the in-memory simulated rotator:
 ```bash
-ROTATOR_PORT=COM3 ./bin/antenna-rotator-server          # Windows
-ROTATOR_PORT=/dev/ttyUSB0 ./bin/antenna-rotator-server  # Linux/macOS
+SIMULATION=true ./bin/antenna-rotator-server    # or: make run-sim
 ```
 
-If no serial port is found, the server falls back to **simulation mode** so the API stays usable for testing and demos.
+The server **refuses to start** if neither `ROTATOR_PORT` nor `SIMULATION=true` is set — a production server must never silently pretend to drive hardware. The startup error lists the serial ports it detected (also available at runtime via `GET /list-ports`).
+
+### Configuration
+
+All configuration is via environment variables:
+
+| Variable           | Default     | Description                                                        |
+|--------------------|-------------|--------------------------------------------------------------------|
+| `ROTATOR_PORT`     | —           | Serial port of the rotator (e.g. `/dev/ttyUSB0`, `COM3`). Required unless simulating. |
+| `ROTATOR_PROTOCOL` | `prosistel` | Rotator protocol: `prosistel` or `yaesu` (GS-232A/B).               |
+| `ROTATOR_BAUD`     | `9600`      | Serial baud rate (older GS-232A interfaces often use 1200–4800).    |
+| `SIMULATION`       | `false`     | `true` runs an in-memory rotator, no hardware needed.               |
+| `LISTEN_ADDR`      | `:8080`     | HTTP listen address.                                                |
+| `LOG_LEVEL`        | `info`      | `debug`, `info`, `warn`, or `error`.                                |
+| `LOG_FORMAT`       | `text`      | `json` for structured JSON logs.                                    |
+
+The server shuts down gracefully on `SIGINT`/`SIGTERM`, draining in-flight requests (10s budget) and closing the serial port.
 
 ### Run with Docker
 ```bash
@@ -49,7 +68,12 @@ docker run --rm -p 8080:8080 \
   -e ROTATOR_PORT=/dev/ttyUSB0 \
   antenna-rotator-server:latest
 ```
-Drop the `--device` and `ROTATOR_PORT` flags to run in simulation mode.
+For simulation mode use `-e SIMULATION=true` and drop the `--device` flag.
+
+Multi-arch images (amd64 + arm64, e.g. for a Raspberry Pi) build with:
+```bash
+make docker-buildx
+```
 
 ---
 
@@ -71,36 +95,47 @@ Use the **Try it out** buttons in Swagger UI to set headings, read the current h
 
 ## HTTP API
 
-All non-health endpoints return JSON. Errors come back as `{"error": "..."}`.
+Canonical paths live under `/api/v1`; the unprefixed paths remain as aliases. All endpoints return JSON. Errors come back as `{"error": "..."}` — `400` for invalid input, `502` when serial communication with the rotator fails.
 
-| Method | Path           | Description                                      |
-|--------|----------------|--------------------------------------------------|
-| POST   | `/set-heading` | Set the antenna heading (`?heading=0..359`)      |
-| GET    | `/get-heading` | Read the current heading                         |
-| POST   | `/stop`        | Stop in-progress rotation                        |
-| GET    | `/list-ports`  | List serial ports detected on the host           |
-| GET    | `/healthz`     | Liveness probe (returns `OK` as `text/plain`)    |
+| Method | Path                  | Description                                          |
+|--------|-----------------------|------------------------------------------------------|
+| POST   | `/api/v1/set-heading` | Set the heading (`?heading=0..359` or JSON body)     |
+| GET    | `/api/v1/get-heading` | Read the current heading                             |
+| POST   | `/api/v1/stop`        | Stop in-progress rotation                            |
+| GET    | `/api/v1/list-ports`  | List serial ports detected on the host               |
+| GET    | `/api/v1/healthz`     | Liveness probe with mode/connection/version info     |
 
 ### Examples
 ```bash
-curl -X POST 'http://localhost:8080/set-heading?heading=180'
+curl -X POST 'http://localhost:8080/api/v1/set-heading?heading=180'
 # {"heading":180,"status":"set"}
 
-curl http://localhost:8080/get-heading
+curl -X POST http://localhost:8080/api/v1/set-heading \
+  -H 'Content-Type: application/json' -d '{"heading":180}'
+# {"heading":180,"status":"set"}
+
+curl http://localhost:8080/api/v1/get-heading
 # {"heading":180}
 
-curl -X POST http://localhost:8080/stop
+curl -X POST http://localhost:8080/api/v1/stop
 # {"status":"stopped"}
 
-curl http://localhost:8080/list-ports
+curl http://localhost:8080/api/v1/list-ports
 # {"ports":["COM3","COM4"]}
+
+curl http://localhost:8080/api/v1/healthz
+# {"status":"ok","mode":"hardware","connected":true,"version":"1.2.0"}
 ```
+
+`healthz` always returns `200` while the process is alive; monitors should alert on `"mode":"simulation"` or `"connected":false` if they expect real hardware.
 
 ---
 
 ## Hardware support
 
-The `rotator-controller` package speaks the **Prosistel** serial protocol (8N1, 9600 baud):
+The `rotator-controller` package speaks two serial protocols (both 8N1), selected with `ROTATOR_PROTOCOL`:
+
+### Prosistel (`ROTATOR_PROTOCOL=prosistel`, the default)
 
 | Action          | Command sent     | Response       |
 |-----------------|------------------|----------------|
@@ -108,25 +143,49 @@ The `rotator-controller` package speaks the **Prosistel** serial protocol (8N1, 
 | Read azimuth    | `AI1\r`          | `+AXXX\r`      |
 | Stop rotation   | `AX1\r`          | —              |
 
-Where `XXX` is the zero-padded 3-digit azimuth in degrees.
+### Yaesu GS-232A/B (`ROTATOR_PROTOCOL=yaesu`)
+
+Covers Yaesu G-450/G-650/G-800/G-1000/G-2800-series rotators attached via a GS-232 computer interface (or a compatible one such as the ERC or K3NG controllers in GS-232 mode).
+
+| Action          | Command sent     | Response                              |
+|-----------------|------------------|---------------------------------------|
+| Set azimuth     | `MXXX\r`         | —                                     |
+| Read azimuth    | `C\r`            | `+0XXX` (GS-232A) or `AZ=XXX` (GS-232B) |
+| Stop rotation   | `S\r`            | —                                     |
+
+Both response variants are recognised automatically, including the azimuth+elevation forms (`+0XXX+0YYY`, `AZ=XXX EL=YYY`) from az/el units — the elevation part is ignored. If your interface runs at a slow baud rate, set `ROTATOR_BAUD` accordingly.
+
+`XXX` is always the zero-padded 3-digit azimuth in degrees. `GET /healthz` reports the active protocol.
+
+### Adding another rotator
+
+Protocols are defined as data, not code: each one is a `ProtocolSpec` entry in the registry in [`rotator-controller/protocols.go`](rotator-controller/protocols.go) — the command templates plus the markers that precede the azimuth in the response. The serial machinery (locking, reconnect, buffer flushing) is shared. To support a new make, add one entry to that table and a few cases to `protocols_test.go`.
+
+Serial access is fully serialized (concurrent HTTP requests can't interleave commands), the input buffer is flushed before every command, and a dead port (e.g. unplugged USB adapter) is automatically reopened on the next request.
 
 ---
 
 ## Development
 
 ```bash
-make build     # build the binary into ./bin
-make test      # run go test ./...
+make build     # build the binary into ./bin (version-stamped from git)
+make test      # go test -race ./...
+make vet       # go vet ./...
+make lint      # golangci-lint run
+make run-sim   # build and run in simulation mode
 make clean     # remove build artifacts
 ```
+
+CI (GitHub Actions) runs vet, the race-enabled test suite, golangci-lint, and a multi-arch Docker build on every push and pull request.
 
 ## Project layout
 ```
 .
-├── main.go                  # entry point
+├── main.go                  # entry point: config, logging, graceful shutdown
 ├── rotator-server/          # HTTP server, Swagger UI, OpenAPI spec
 │   └── static/              # embedded swagger.html + openapi.yaml
 ├── rotator-controller/      # serial-port rotator driver (Prosistel)
-├── Dockerfile               # multi-stage scratch image
+├── .github/workflows/       # CI: vet, race tests, lint, docker build
+├── Dockerfile               # multi-stage, multi-arch scratch image
 └── Makefile                 # build/test/docker helpers
 ```

@@ -2,21 +2,41 @@ package server
 
 import (
 	controller "antenna-rotator-server/rotator-controller"
+	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 //go:embed static
 var staticFS embed.FS
 
+// Rotator is the surface the HTTP layer needs from a rotator controller.
+// *controller.RotatorController implements it; tests substitute fakes.
+type Rotator interface {
+	SetHeading(deg int) error
+	GetHeading() (int, error)
+	Stop() error
+	Mode() string
+	Protocol() string
+	Connected() bool
+}
+
+type Config struct {
+	Addr    string // listen address, e.g. ":8080"
+	Rotator Rotator
+	Version string // reported by /healthz
+}
+
 type Server struct {
-	HttpServer http.Server
+	httpServer *http.Server
 }
 
 type errorBody struct {
@@ -36,6 +56,14 @@ type portsBody struct {
 	Ports []string `json:"ports"`
 }
 
+type healthBody struct {
+	Status    string `json:"status"`
+	Mode      string `json:"mode"`
+	Protocol  string `json:"protocol"`
+	Connected bool   `json:"connected"`
+	Version   string `json:"version"`
+}
+
 func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -46,76 +74,86 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, errorBody{Error: msg})
 }
 
-func CreateServer() *Server {
+// writeRotatorError maps controller errors to HTTP statuses: validation
+// problems are the client's fault (400), anything else is a serial I/O
+// failure upstream of this server (502).
+func writeRotatorError(w http.ResponseWriter, err error) {
+	if errors.Is(err, controller.ErrInvalidHeading) {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeError(w, http.StatusBadGateway, err.Error())
+}
+
+func New(cfg Config) *Server {
+	if cfg.Rotator == nil {
+		panic("server.New: Config.Rotator must not be nil")
+	}
+	if cfg.Addr == "" {
+		cfg.Addr = ":8080"
+	}
+	if cfg.Version == "" {
+		cfg.Version = "dev"
+	}
+
 	mux := http.NewServeMux()
+	registerAPIRoutes(mux, cfg)
+	registerDocsRoutes(mux)
 
-	rotator := initRotator()
+	return &Server{
+		httpServer: &http.Server{
+			Addr:              cfg.Addr,
+			Handler:           requestLogger(mux),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		},
+	}
+}
 
-	mux.HandleFunc("/set-heading", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-			return
-		}
-		heading := r.URL.Query().Get("heading")
-		if heading == "" {
-			writeError(w, http.StatusBadRequest, "Missing heading parameter")
-			return
-		}
-		if rotator == nil {
-			writeError(w, http.StatusInternalServerError, "Rotator controller not initialized")
-			return
-		}
-		if err := rotator.SetHeading(heading); err != nil {
+// registerAPIRoutes wires every API endpoint under both its legacy
+// unprefixed path and the canonical /api/v1 prefix.
+func registerAPIRoutes(mux *http.ServeMux, cfg Config) {
+	rotator := cfg.Rotator
+
+	handle := func(pattern string, h http.HandlerFunc) {
+		method, path, _ := strings.Cut(pattern, " ")
+		mux.HandleFunc(method+" "+path, h)
+		mux.HandleFunc(method+" /api/v1"+path, h)
+	}
+
+	handle("POST /set-heading", func(w http.ResponseWriter, r *http.Request) {
+		deg, err := parseHeadingRequest(r)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		deg, _ := strconv.Atoi(strings.TrimSpace(heading))
+		if err := rotator.SetHeading(deg); err != nil {
+			writeRotatorError(w, err)
+			return
+		}
 		writeJSON(w, http.StatusOK, headingBody{Heading: deg, Status: "set"})
 	})
 
-	mux.HandleFunc("/get-heading", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-			return
-		}
-		if rotator == nil {
-			writeError(w, http.StatusInternalServerError, "Rotator controller not initialized")
-			return
-		}
+	handle("GET /get-heading", func(w http.ResponseWriter, r *http.Request) {
 		heading, err := rotator.GetHeading()
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeRotatorError(w, err)
 			return
 		}
-		deg, err := strconv.Atoi(strings.TrimSpace(heading))
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("invalid heading from controller: %q", heading))
-			return
-		}
-		writeJSON(w, http.StatusOK, headingBody{Heading: deg})
+		writeJSON(w, http.StatusOK, headingBody{Heading: heading})
 	})
 
-	mux.HandleFunc("/stop", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-			return
-		}
-		if rotator == nil {
-			writeError(w, http.StatusInternalServerError, "Rotator controller not initialized")
-			return
-		}
+	handle("POST /stop", func(w http.ResponseWriter, r *http.Request) {
 		if err := rotator.Stop(); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			writeRotatorError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, stopBody{Status: "stopped"})
 	})
 
-	mux.HandleFunc("/list-ports", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-			return
-		}
+	handle("GET /list-ports", func(w http.ResponseWriter, r *http.Request) {
 		ports, err := controller.ListAvailablePorts()
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -127,23 +165,41 @@ func CreateServer() *Server {
 		writeJSON(w, http.StatusOK, portsBody{Ports: ports})
 	})
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
+	handle("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, healthBody{
+			Status:    "ok",
+			Mode:      rotator.Mode(),
+			Protocol:  rotator.Protocol(),
+			Connected: rotator.Connected(),
+			Version:   cfg.Version,
+		})
 	})
+}
 
-	registerDocsRoutes(mux)
-
-	return &Server{
-		HttpServer: http.Server{
-			Addr:    ":8080",
-			Handler: mux,
-		},
+// parseHeadingRequest accepts the heading either as a `?heading=` query
+// parameter or as a JSON body `{"heading": N}`.
+func parseHeadingRequest(r *http.Request) (int, error) {
+	if q := r.URL.Query().Get("heading"); q != "" {
+		deg, err := strconv.Atoi(strings.TrimSpace(q))
+		if err != nil {
+			return 0, fmt.Errorf("invalid heading %q: must be an integer", q)
+		}
+		return deg, nil
 	}
+	if strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+		var body struct {
+			Heading *int `json:"heading"`
+		}
+		dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1024))
+		if err := dec.Decode(&body); err != nil {
+			return 0, fmt.Errorf("invalid JSON body: %v", err)
+		}
+		if body.Heading == nil {
+			return 0, fmt.Errorf("JSON body missing \"heading\" field")
+		}
+		return *body.Heading, nil
+	}
+	return 0, fmt.Errorf("missing heading: pass ?heading=N or a JSON body {\"heading\": N}")
 }
 
 // registerDocsRoutes wires up the Swagger UI page, the OpenAPI spec, and a
@@ -159,21 +215,13 @@ func registerDocsRoutes(mux *http.ServeMux) {
 	}
 
 	serveSwagger := func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-			return
-		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(swaggerHTML)
 	}
-	mux.HandleFunc("/swagger", serveSwagger)
-	mux.HandleFunc("/swagger/", serveSwagger)
+	mux.HandleFunc("GET /swagger", serveSwagger)
+	mux.HandleFunc("GET /swagger/", serveSwagger)
 
-	mux.HandleFunc("/openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
-			return
-		}
+	mux.HandleFunc("GET /openapi.yaml", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/yaml")
 		_, _ = w.Write(openAPI)
 	})
@@ -182,48 +230,63 @@ func registerDocsRoutes(mux *http.ServeMux) {
 	// vendored swagger-ui-dist bundle for offline use).
 	sub, err := fs.Sub(staticFS, "static")
 	if err == nil {
-		mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(sub))))
+		mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(sub))))
 	}
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			http.NotFound(w, r)
-			return
-		}
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/swagger/", http.StatusFound)
 	})
 }
 
-// initRotator opens the port named by ROTATOR_PORT, or auto-detects the first
-// available port if the env var is not set. If no port is available it falls
-// back to a simulation-mode controller so the API stays usable for testing.
-func initRotator() *controller.RotatorController {
-	portName := os.Getenv("ROTATOR_PORT")
-	var (
-		r   *controller.RotatorController
-		err error
-	)
-	if portName != "" {
-		r, err = controller.NewRotatorControllerWithPort(portName)
-	} else {
-		r, err = controller.NewRotatorController()
-	}
-	if err != nil {
-		fmt.Printf("Rotator controller unavailable (%v) — running in simulation mode\n", err)
-		return controller.NewSimulationController()
-	}
-	if portName == "" {
-		fmt.Println("Rotator controller connected on auto-detected port")
-	} else {
-		fmt.Printf("Rotator controller connected on %s\n", portName)
-	}
-	return r
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
 }
 
-func (s *Server) StartServer() {
-	fmt.Println("Starting server on :8080 ...")
-	fmt.Println("Swagger UI: http://localhost:8080/swagger/")
-	if err := s.HttpServer.ListenAndServe(); err != nil {
-		fmt.Println("Server error:", err)
-	}
+func (sr *statusRecorder) WriteHeader(code int) {
+	sr.status = code
+	sr.ResponseWriter.WriteHeader(code)
+}
+
+// requestLogger logs one line per request via slog. Health probes are logged
+// at Debug so they don't drown out real traffic.
+func requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+
+		level := slog.LevelInfo
+		if strings.HasSuffix(r.URL.Path, "/healthz") {
+			level = slog.LevelDebug
+		}
+		slog.LogAttrs(r.Context(), level, "request",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", rec.status),
+			slog.Duration("duration", time.Since(start)),
+			slog.String("remote", r.RemoteAddr),
+		)
+	})
+}
+
+// Handler exposes the root handler for tests.
+func (s *Server) Handler() http.Handler {
+	return s.httpServer.Handler
+}
+
+// Addr reports the configured listen address.
+func (s *Server) Addr() string {
+	return s.httpServer.Addr
+}
+
+// ListenAndServe blocks serving HTTP until Shutdown is called or the
+// listener fails. It returns http.ErrServerClosed after a clean shutdown.
+func (s *Server) ListenAndServe() error {
+	return s.httpServer.ListenAndServe()
+}
+
+// Shutdown gracefully drains in-flight requests.
+func (s *Server) Shutdown(ctx context.Context) error {
+	return s.httpServer.Shutdown(ctx)
 }

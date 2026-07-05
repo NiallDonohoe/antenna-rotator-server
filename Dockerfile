@@ -1,14 +1,11 @@
-# Multi-stage build for a small production image
-FROM golang:1.24 AS builder
+# Multi-stage build for a small production image.
+# Multi-arch aware: `docker buildx build --platform linux/amd64,linux/arm64 .`
+# cross-compiles on the build host (no QEMU-emulated compile).
+FROM --platform=$BUILDPLATFORM golang:1.24 AS builder
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
 WORKDIR /src
-
-# Install build dependencies
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends \
-		build-essential \
-		pkg-config \
-		ca-certificates \
-	&& rm -rf /var/lib/apt/lists/*
 
 # Cache dependencies
 COPY go.mod go.sum ./
@@ -28,16 +25,15 @@ RUN groupadd -g ${APP_DIALOUT_GID} -f dialout \
 
 # Copy sources and build the binary (after sources are present)
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o /out/antenna-rotator-server . \
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+	go build -ldflags "-s -w -X main.version=${VERSION}" -o /out/antenna-rotator-server . \
 	&& chown ${APP_USER_UID}:${APP_USER_GID} /out/antenna-rotator-server
 
 FROM scratch
 ARG APP_USER_UID=1000
 ARG APP_USER_GID=1000
-ARG APP_USERNAME=appuser
 
 # Copy CA certificates and the statically-linked binary from the builder stage.
-# The builder stage installs CA certs so we can copy them into this minimal image.
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 # Copy passwd/group so the configured user and the 'dialout' group exist inside the scratch image
 COPY --from=builder /etc/passwd /etc/group /etc/
