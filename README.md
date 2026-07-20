@@ -1,8 +1,11 @@
 # Antenna Rotator Server
 
 [![CI](https://github.com/NiallDonohoe/antenna-rotator-server/actions/workflows/ci.yml/badge.svg)](https://github.com/NiallDonohoe/antenna-rotator-server/actions/workflows/ci.yml)
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-donate-yellow.svg?logo=buy-me-a-coffee)](https://buymeacoffee.com/nialldonohg)
 
 Go-based server that allows remote control of antenna rotators.
+
+If you find this project helpful or useful, consider [buying me a coffee](https://buymeacoffee.com/nialldonohg) ☕.
 
 ## Why rotate antennas?
 Rotating a directional antenna (for example a Yagi or beam) is essential in amateur radio to point the antenna's main lobe toward the station or satellite you want to work. Proper antenna orientation increases received and transmitted signal strength, reduces interference from unwanted directions, and is critical for activities like DXing, contesting and satellite tracking (azimuth-only).
