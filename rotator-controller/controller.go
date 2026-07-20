@@ -100,7 +100,7 @@ func openSerialPort(portName string, baud int) (serial.Port, error) {
 		return nil, err
 	}
 	if err := p.SetReadTimeout(readTimeout); err != nil {
-		p.Close()
+		_ = p.Close()
 		return nil, fmt.Errorf("could not set read timeout: %v", err)
 	}
 	return p, nil
@@ -232,7 +232,7 @@ func (rc *RotatorController) connectLocked() error {
 
 func (rc *RotatorController) dropPortLocked() {
 	if rc.port != nil {
-		rc.port.Close()
+		_ = rc.port.Close()
 		rc.port = nil
 	}
 }
