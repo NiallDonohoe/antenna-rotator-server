@@ -25,18 +25,25 @@ func main() {
 	setupLogging()
 	slog.Info("starting antenna-rotator-server", "version", version)
 
-	rotator, err := buildRotator()
+	offsetFile := os.Getenv("ROTATOR_OFFSET_FILE")
+	rotator, err := buildRotator(offsetFile)
 	if err != nil {
 		slog.Error("startup failed", "error", err)
 		os.Exit(1)
 	}
 	defer rotator.Close()
 
-	srv := server.New(server.Config{
+	cfg := server.Config{
 		Addr:    listenAddr(),
 		Rotator: rotator,
 		Version: version,
-	})
+	}
+	if offsetFile != "" {
+		cfg.SaveOffset = func(offset int) error { return saveOffset(offsetFile, offset) }
+	} else {
+		slog.Warn("ROTATOR_OFFSET_FILE is not set: an offset set via the API will be lost on restart")
+	}
+	srv := server.New(cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -72,18 +79,18 @@ func main() {
 //	ROTATOR_BAUD=...      → serial baud rate (default 9600)
 //	ROTATOR_HEADING_OFFSET=... → calibration offset in degrees, added to
 //	                             raw rotator readings (default 0)
+//	ROTATOR_OFFSET_FILE=...    → where POST /offset saves the offset; a saved
+//	                             value takes precedence over the env var
 //
 // A hardware server must never silently pretend to work, so with neither
 // SIMULATION nor ROTATOR_PORT set startup fails with a hint listing the
-// ports it can see.
-func buildRotator() (*controller.RotatorController, error) {
-	offset := 0
-	if o := os.Getenv("ROTATOR_HEADING_OFFSET"); o != "" {
-		v, err := strconv.Atoi(strings.TrimSpace(o))
-		if err != nil {
-			return nil, fmt.Errorf("invalid ROTATOR_HEADING_OFFSET %q: must be an integer", o)
-		}
-		offset = v
+// ports it can see. A port that is set but can't be opened yet is only a
+// warning: the controller retries on every request, so a USB adapter that
+// enumerates late after a power cut is picked up without a restart.
+func buildRotator(offsetFile string) (*controller.RotatorController, error) {
+	offset, err := initialOffset(offsetFile)
+	if err != nil {
+		return nil, err
 	}
 
 	if isTruthy(os.Getenv("SIMULATION")) {
@@ -112,16 +119,44 @@ func buildRotator() (*controller.RotatorController, error) {
 		opts.BaudRate = baud
 	}
 
-	rotator, err := controller.NewRotatorControllerWithPort(portName, opts)
+	rotator, err := controller.NewRotatorController(portName, opts)
 	if err != nil {
 		return nil, err
 	}
 	rotator.SetOffset(offset)
-	slog.Info("rotator controller connected", "port", portName, "protocol", rotator.Protocol())
+	if err := rotator.Connect(); err != nil {
+		slog.Warn("serial port not available yet, will retry on each request", "port", portName, "error", err)
+	} else {
+		slog.Info("rotator controller connected", "port", portName, "protocol", rotator.Protocol())
+	}
 	if offset != 0 {
 		slog.Info("heading offset applied", "offset", offset)
 	}
 	return rotator, nil
+}
+
+// initialOffset picks the calibration offset to start with: the one a
+// previous POST /offset saved to offsetFile if there is one, otherwise
+// ROTATOR_HEADING_OFFSET, otherwise 0.
+func initialOffset(offsetFile string) (int, error) {
+	if offsetFile != "" {
+		offset, ok, err := loadOffset(offsetFile)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			slog.Info("loaded saved heading offset", "file", offsetFile, "offset", offset)
+			return offset, nil
+		}
+	}
+	if o := os.Getenv("ROTATOR_HEADING_OFFSET"); o != "" {
+		v, err := strconv.Atoi(strings.TrimSpace(o))
+		if err != nil {
+			return 0, fmt.Errorf("invalid ROTATOR_HEADING_OFFSET %q: must be an integer", o)
+		}
+		return v, nil
+	}
+	return 0, nil
 }
 
 func listenAddr() string {

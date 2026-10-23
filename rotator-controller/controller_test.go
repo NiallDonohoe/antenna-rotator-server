@@ -336,3 +336,51 @@ func TestErrorWhenReconnectAlsoFails(t *testing.T) {
 		t.Error("controller should report disconnected after failed reconnect")
 	}
 }
+
+func TestNewRotatorControllerRejectsUnknownProtocol(t *testing.T) {
+	if _, err := NewRotatorController("FAKE", Options{Protocol: "nope"}); err == nil {
+		t.Fatal("expected error for unsupported protocol")
+	}
+}
+
+func TestStartsDisconnectedAndConnectsWhenPortAppears(t *testing.T) {
+	fp := newFakePort()
+	fp.responses["\x02A?\r"] = []byte("\x02A,?,090,R\r")
+
+	present := false
+	rc := &RotatorController{
+		portName: "FAKE",
+		proto:    mustProtocol("prosistel"),
+		open: func(string) (serial.Port, error) {
+			if !present {
+				return nil, fmt.Errorf("no such device")
+			}
+			return fp, nil
+		},
+	}
+
+	if err := rc.Connect(); err == nil {
+		t.Fatal("Connect: expected error while the port is missing")
+	}
+	if rc.Connected() {
+		t.Error("controller should report disconnected while the port is missing")
+	}
+	if _, err := rc.GetHeading(); err == nil {
+		t.Fatal("GetHeading: expected error while the port is missing")
+	}
+
+	present = true // USB adapter finishes enumerating
+	h, err := rc.GetHeading()
+	if err != nil {
+		t.Fatalf("GetHeading should succeed once the port appears: %v", err)
+	}
+	if h != 90 {
+		t.Errorf("got %d, want 90", h)
+	}
+	if !rc.Connected() {
+		t.Error("controller should report connected once the port appears")
+	}
+	if err := rc.Connect(); err != nil {
+		t.Errorf("Connect on an open port should be a no-op: %v", err)
+	}
+}

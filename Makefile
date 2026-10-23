@@ -3,9 +3,9 @@ BINARY := $(APP_NAME)
 BIN_DIR := bin
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
-DOCKER_IMAGE ?= $(APP_NAME):latest
+PREFIX ?= /usr/local
 
-.PHONY: all build build-linux build-windows test vet lint clean run-sim docker-build docker-buildx docker-push
+.PHONY: all build build-linux build-windows test vet lint clean run-sim install
 
 all: build
 
@@ -17,8 +17,8 @@ build-linux:
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(BIN_DIR)/$(BINARY)-linux-amd64
 
-# Cross-compile a native Windows binary (talks to COM ports directly, no
-# Docker/USB-passthrough needed). Run it with: ROTATOR_PORT=COM3 ./bin/antenna-rotator-server-windows-amd64.exe
+# Cross-compile a native Windows binary (talks to COM ports directly).
+# Run it with: ROTATOR_PORT=COM3 ./bin/antenna-rotator-server-windows-amd64.exe
 build-windows:
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(BIN_DIR)/$(BINARY)-windows-amd64.exe
@@ -39,19 +39,11 @@ run-sim: build
 clean:
 	rm -rf $(BIN_DIR) $(BINARY) $(BINARY)-linux-amd64 $(BINARY)-windows-amd64.exe
 
-# Docker targets
-docker-build:
-	docker build --build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE) .
-
-# Multi-arch build (amd64 + arm64, e.g. for Raspberry Pi). Requires buildx.
-# Add --push and set DOCKER_IMAGE to a registry tag to publish.
-docker-buildx:
-	docker buildx build --platform linux/amd64,linux/arm64 \
-		--build-arg VERSION=$(VERSION) -t $(DOCKER_IMAGE) .
-
-# Example usage: make docker-push DOCKER_REPO=myrepo/antenna-rotator-server:1.0.0
-docker-push:
-	@echo "About to push $(DOCKER_IMAGE) to $(DOCKER_REPO)"
-	if [ -z "$(DOCKER_REPO)" ]; then echo "Set DOCKER_REPO to push the image"; exit 1; fi
-	docker tag $(DOCKER_IMAGE) $(DOCKER_REPO)
-	docker push $(DOCKER_REPO)
+# Install the binary and systemd unit (run `make build` first, then
+# `sudo make install`). An existing /etc/$(APP_NAME).env is never overwritten.
+install:
+	@test -f $(BIN_DIR)/$(BINARY) || { echo "Run 'make build' first"; exit 1; }
+	install -m 0755 $(BIN_DIR)/$(BINARY) $(PREFIX)/bin/$(BINARY)
+	install -m 0644 deploy/$(APP_NAME).service /etc/systemd/system/$(APP_NAME).service
+	test -f /etc/$(APP_NAME).env || install -m 0644 deploy/$(APP_NAME).env /etc/$(APP_NAME).env
+	systemctl daemon-reload

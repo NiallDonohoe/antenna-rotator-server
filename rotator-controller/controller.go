@@ -38,7 +38,7 @@ type RotatorController struct {
 	mu        sync.Mutex
 	simulated bool
 	portName  string
-	port      serial.Port // nil when disconnected (hardware mode) or simulated
+	port      serial.Port  // nil when disconnected (hardware mode) or simulated
 	heading   int          // simulation mode only; otherwise the last-read raw value is not cached
 	offset    int          // calibration offset: real-world heading = raw rotator heading + offset
 	proto     ProtocolSpec // zero value in simulation mode
@@ -62,9 +62,10 @@ func NewSimulationController() *RotatorController {
 	return &RotatorController{simulated: true}
 }
 
-// NewRotatorControllerWithPort opens the named serial port immediately so a
-// misconfigured or missing device fails at startup rather than on first use.
-func NewRotatorControllerWithPort(portName string, opts Options) (*RotatorController, error) {
+// NewRotatorController validates the options and returns a hardware
+// controller for the named serial port. It does not open the port: call
+// Connect to try it up front, or let the first operation open it.
+func NewRotatorController(portName string, opts Options) (*RotatorController, error) {
 	proto, err := protocolByName(opts.Protocol)
 	if err != nil {
 		return nil, err
@@ -73,19 +74,29 @@ func NewRotatorControllerWithPort(portName string, opts Options) (*RotatorContro
 	if baud == 0 {
 		baud = defaultBaudRate
 	}
-	rc := &RotatorController{
+	return &RotatorController{
 		portName: portName,
 		proto:    proto,
 		open: func(name string) (serial.Port, error) {
 			return openSerialPort(name, baud)
 		},
+	}, nil
+}
+
+// Connect opens the serial port if it is not already open. A failure is not
+// fatal: every operation reopens the port on demand, so a USB adapter that
+// enumerates after the server starts (e.g. after a power cut) is picked up
+// on the next request.
+func (rc *RotatorController) Connect() error {
+	if rc.simulated {
+		return nil
 	}
 	rc.mu.Lock()
 	defer rc.mu.Unlock()
-	if err := rc.connectLocked(); err != nil {
-		return nil, err
+	if rc.port != nil {
+		return nil
 	}
-	return rc, nil
+	return rc.connectLocked()
 }
 
 func openSerialPort(portName string, baud int) (serial.Port, error) {
