@@ -34,8 +34,8 @@ Commercial, remotely controlled rotator systems are often expensive and tightly 
 
 ### Run from source
 ```bash
-make build
-ROTATOR_PORT=/dev/ttyUSB0 ./bin/antenna-rotator-server   # Linux/macOS
+go build -o antenna-rotator-server .
+ROTATOR_PORT=/dev/ttyUSB0 ./antenna-rotator-server   # Linux/macOS
 ```
 
 ### Windows
@@ -44,7 +44,7 @@ Run the native Windows binary directly against a COM port.
 
 Cross-compile from Linux/macOS:
 ```bash
-make build-windows
+GOOS=windows GOARCH=amd64 go build -o antenna-rotator-server.exe .
 ```
 or build straight from Go on the Windows machine itself:
 ```powershell
@@ -66,7 +66,7 @@ The server listens on port `8080` by default. Open <http://localhost:8080/swagge
 
 No hardware attached? Run against the in-memory simulated rotator:
 ```bash
-SIMULATION=true ./bin/antenna-rotator-server    # or: make run-sim
+SIMULATION=true ./antenna-rotator-server    # or: SIMULATION=true go run .
 ```
 
 The server **refuses to start** if neither `ROTATOR_PORT` nor `SIMULATION=true` is set — a production server must never silently pretend to drive hardware. The startup error lists the serial ports it detected (also available at runtime via `GET /list-ports`).
@@ -93,10 +93,13 @@ The server shuts down gracefully on `SIGINT`/`SIGTERM`, draining in-flight reque
 
 ### Run as a service (Raspberry Pi / Linux)
 
-For an unattended station, build on the Pi and install the bundled systemd unit:
+For an unattended station, build on the Pi and install the bundled systemd unit. You need Go 1.24 or newer from <https://go.dev/dl/>; the `golang` package in Debian/Raspberry Pi OS is too old.
 ```bash
-make build
-sudo make install          # binary, systemd unit, and /etc/antenna-rotator-server.env (if missing)
+go build -o antenna-rotator-server .
+sudo install -m 0755 antenna-rotator-server /usr/local/bin/
+sudo install -m 0644 deploy/antenna-rotator-server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo install -m 0644 deploy/antenna-rotator-server.env /etc/   # first install only: this is your config
 ```
 
 Point `ROTATOR_PORT` at the adapter's stable name under `/dev/serial/by-id/`. `/dev/ttyUSB0` and friends are numbered in the order adapters appear, so they can swap between reboots:
@@ -113,7 +116,14 @@ The unit ([`deploy/antenna-rotator-server.service`](deploy/antenna-rotator-serve
 - restarts automatically if the process ever exits
 - saves the calibration offset to `/var/lib/antenna-rotator-server/offset`, so it survives reboots
 
-To upgrade, `git pull && make build && sudo make install && sudo systemctl restart antenna-rotator-server`. Your env file is left alone.
+To upgrade:
+```bash
+git pull
+go build -o antenna-rotator-server .
+sudo install -m 0755 antenna-rotator-server /usr/local/bin/
+sudo systemctl restart antenna-rotator-server
+```
+If an upgrade changes `deploy/antenna-rotator-server.service`, reinstall it and run `sudo systemctl daemon-reload` before restarting. Don't recopy the env file, or you'll overwrite your settings.
 
 ---
 
@@ -230,15 +240,14 @@ Serial access is fully serialized (concurrent HTTP requests can't interleave com
 ## Development
 
 ```bash
-make build         # build the binary into ./bin (version-stamped from git)
-make build-windows # cross-compile a Windows .exe into ./bin
-make test          # go test -race ./...
-make vet       # go vet ./...
-make lint      # golangci-lint run
-make run-sim   # build and run in simulation mode
-make install   # install the binary + systemd unit (sudo; run make build first)
-make clean     # remove build artifacts
+go build -o antenna-rotator-server .   # build; the version comes from git automatically
+go test -race ./...                    # tests with the race detector
+go vet ./...
+golangci-lint run                      # lint (CI uses v2.12.2)
+SIMULATION=true go run .               # run against the simulated rotator
 ```
+
+`/healthz` reports the version Go records at build time: the tag (e.g. `v1.0.0`) when you build a tagged commit, otherwise the commit, plus `+dirty` if you have uncommitted changes. `go run` reports `dev`.
 
 CI (GitHub Actions) runs vet, the race-enabled test suite, and golangci-lint on every push and pull request.
 
@@ -251,6 +260,5 @@ CI (GitHub Actions) runs vet, the race-enabled test suite, and golangci-lint on 
 │   └── static/              # embedded swagger.html + openapi.yaml
 ├── rotator-controller/      # serial-port rotator driver (Prosistel, Yaesu GS-232)
 ├── deploy/                  # systemd unit + example env file
-├── .github/workflows/       # CI: vet, race tests, lint
-└── Makefile                 # build/test/install helpers
+└── .github/workflows/       # CI: vet, race tests, lint
 ```

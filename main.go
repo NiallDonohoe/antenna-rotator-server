@@ -10,14 +10,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-// version is stamped at build time via -ldflags "-X main.version=...".
-var version = "dev"
+var version = buildVersion()
 
 const shutdownTimeout = 10 * time.Second
 
@@ -180,6 +180,17 @@ func setupLogging() {
 		handler = slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
 	}
 	slog.SetDefault(slog.New(handler))
+}
+
+// buildVersion reports the version Go records for the main module at build
+// time: the git tag (e.g. v1.0.0) when building a tagged commit, otherwise a
+// pseudo-version naming the commit, with +dirty for uncommitted changes.
+// `go run` and builds outside a git checkout record nothing, giving "dev".
+func buildVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
 }
 
 func isTruthy(s string) bool {
