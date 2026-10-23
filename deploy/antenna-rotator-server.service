@@ -1,0 +1,25 @@
+[Unit]
+Description=Antenna rotator server
+Documentation=https://github.com/NiallDonohoe/antenna-rotator-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/antenna-rotator-server
+# The offset file lives in the StateDirectory below. Anything set in the
+# EnvironmentFile overrides these defaults.
+Environment=ROTATOR_OFFSET_FILE=/var/lib/antenna-rotator-server/offset
+EnvironmentFile=/etc/antenna-rotator-server.env
+
+# Run as a throwaway unprivileged user that can open serial ports.
+DynamicUser=yes
+SupplementaryGroups=dialout
+StateDirectory=antenna-rotator-server
+
+# Come back after crashes and bad config edits without anyone on site.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

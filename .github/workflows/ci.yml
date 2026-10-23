@@ -16,7 +16,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # Latest patch of the minor version in go.mod. go-version-file would
+          # pin the exact go.mod version (1.26.0) and miss security fixes.
+          go-version: "1.26.x"
       - name: go vet
         run: go vet ./...
       - name: Build
@@ -31,22 +33,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
+          # Latest patch of the minor version in go.mod. go-version-file would
+          # pin the exact go.mod version (1.26.0) and miss security fixes.
+          go-version: "1.26.x"
       - uses: golangci/golangci-lint-action@v8
         with:
-          version: latest
+          version: v2.12.2
 
-  docker:
-    name: Docker build (amd64 + arm64)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: false
-          build-args: |
-            VERSION=${{ github.sha }}

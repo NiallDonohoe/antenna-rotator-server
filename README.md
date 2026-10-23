@@ -23,6 +23,7 @@ Commercial, remotely controlled rotator systems are often expensive and tightly 
 - **Networked control:** expose a standard API for remote control and automation
 - **Automation-friendly:** ideal for azimuth-only satellite tracking, scheduled direction changes, or contests
 - **Robust serial handling:** serialized port access, automatic reconnect after USB glitches, stale-byte flushing
+- **Built for unattended stations:** starts even if the USB adapter isn't there yet, keeps its calibration across restarts, and ships with a systemd unit
 - **Built-in Swagger UI:** point a browser at the server and drive the API by hand
 
 > ⚠️ The API has **no authentication**. Only expose it on a trusted LAN, or put it behind a reverse proxy that adds TLS + auth if you need Internet access.
@@ -33,17 +34,17 @@ Commercial, remotely controlled rotator systems are often expensive and tightly 
 
 ### Run from source
 ```bash
-make build
-ROTATOR_PORT=/dev/ttyUSB0 ./bin/antenna-rotator-server   # Linux/macOS
+go build -o antenna-rotator-server .
+ROTATOR_PORT=/dev/ttyUSB0 ./antenna-rotator-server   # Linux/macOS
 ```
 
 ### Windows
 
-Run the native Windows binary directly against a COM port — this is the recommended way to run on Windows, since Docker Desktop's Linux VM can't see COM ports without extra USB-passthrough tooling (`usbipd-win`).
+Run the native Windows binary directly against a COM port.
 
 Cross-compile from Linux/macOS:
 ```bash
-make build-windows
+GOOS=windows GOARCH=amd64 go build -o antenna-rotator-server.exe .
 ```
 or build straight from Go on the Windows machine itself:
 ```powershell
@@ -65,10 +66,12 @@ The server listens on port `8080` by default. Open <http://localhost:8080/swagge
 
 No hardware attached? Run against the in-memory simulated rotator:
 ```bash
-SIMULATION=true ./bin/antenna-rotator-server    # or: make run-sim
+SIMULATION=true ./antenna-rotator-server    # or: SIMULATION=true go run .
 ```
 
 The server **refuses to start** if neither `ROTATOR_PORT` nor `SIMULATION=true` is set — a production server must never silently pretend to drive hardware. The startup error lists the serial ports it detected (also available at runtime via `GET /list-ports`).
+
+If `ROTATOR_PORT` is set but the port can't be opened yet (say, the USB adapter is still enumerating after a power cut), the server logs a warning and **starts anyway**. Every request retries the port, so it picks the adapter up as soon as it appears; until then rotator calls return `502` and `GET /readyz` returns `503`.
 
 ### Configuration
 
@@ -80,27 +83,47 @@ All configuration is via environment variables:
 | `ROTATOR_PROTOCOL` | `prosistel` | Rotator protocol: `prosistel` or `yaesu` (GS-232A/B).               |
 | `ROTATOR_BAUD`     | `9600`      | Serial baud rate (older GS-232A interfaces often use 1200–4800).    |
 | `ROTATOR_HEADING_OFFSET` | `0`   | Calibration offset in degrees, added to raw rotator readings (see [Calibration offset](#calibration-offset)). |
+| `ROTATOR_OFFSET_FILE` | —        | File where `POST /offset` saves the offset so it survives restarts. A saved value takes precedence over `ROTATOR_HEADING_OFFSET`. Unset means offsets set via the API are lost on restart. |
 | `SIMULATION`       | `false`     | `true` runs an in-memory rotator, no hardware needed.               |
 | `LISTEN_ADDR`      | `:8080`     | HTTP listen address.                                                |
-| `LOG_LEVEL`        | `info`      | `debug`, `info`, `warn`, or `error`.                                |
+| `LOG_LEVEL`        | `info`      | `debug`, `info`, `warn`, or `error`. Read requests (`GET`) such as Node-RED polling are logged at `debug`, so they only show up there. |
 | `LOG_FORMAT`       | `text`      | `json` for structured JSON logs.                                    |
 
 The server shuts down gracefully on `SIGINT`/`SIGTERM`, draining in-flight requests (10s budget) and closing the serial port.
 
-### Run with Docker
-```bash
-make docker-build
-docker run --rm -p 8080:8080 \
-  --device=/dev/ttyUSB0 \
-  -e ROTATOR_PORT=/dev/ttyUSB0 \
-  antenna-rotator-server:latest
-```
-For simulation mode use `-e SIMULATION=true` and drop the `--device` flag.
+### Run as a service (Raspberry Pi / Linux)
 
-Multi-arch images (amd64 + arm64, e.g. for a Raspberry Pi) build with:
+For an unattended station, build on the Pi and install the bundled systemd unit. You need Go 1.26 or newer from <https://go.dev/dl/>; the `golang` package in Debian/Raspberry Pi OS is too old.
 ```bash
-make docker-buildx
+go build -o antenna-rotator-server .
+sudo install -m 0755 antenna-rotator-server /usr/local/bin/
+sudo install -m 0644 deploy/antenna-rotator-server.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo install -m 0644 deploy/antenna-rotator-server.env /etc/   # first install only: this is your config
 ```
+
+Point `ROTATOR_PORT` at the adapter's stable name under `/dev/serial/by-id/`. `/dev/ttyUSB0` and friends are numbered in the order adapters appear, so they can swap between reboots:
+```bash
+ls -l /dev/serial/by-id/
+# usb-FTDI_FT232R_USB_UART_A10KXYZ1-if00-port0 -> ../../ttyUSB0
+sudo nano /etc/antenna-rotator-server.env   # set ROTATOR_PORT and ROTATOR_PROTOCOL
+sudo systemctl enable --now antenna-rotator-server
+journalctl -u antenna-rotator-server -f     # follow the logs
+```
+
+The unit ([`deploy/antenna-rotator-server.service`](deploy/antenna-rotator-server.service)):
+- runs as an unprivileged throwaway user in the `dialout` group, so it can open serial ports but nothing else
+- restarts automatically if the process ever exits
+- saves the calibration offset to `/var/lib/antenna-rotator-server/offset`, so it survives reboots
+
+To upgrade:
+```bash
+git pull
+go build -o antenna-rotator-server .
+sudo install -m 0755 antenna-rotator-server /usr/local/bin/
+sudo systemctl restart antenna-rotator-server
+```
+If an upgrade changes `deploy/antenna-rotator-server.service`, reinstall it and run `sudo systemctl daemon-reload` before restarting. Don't recopy the env file, or you'll overwrite your settings.
 
 ---
 
@@ -133,6 +156,7 @@ Canonical paths live under `/api/v1`; the unprefixed paths remain as aliases. Al
 | POST   | `/api/v1/offset`      | Set the calibration offset (`?offset=N` or JSON body) |
 | GET    | `/api/v1/list-ports`  | List serial ports detected on the host               |
 | GET    | `/api/v1/healthz`     | Liveness probe with mode/connection/version info     |
+| GET    | `/api/v1/readyz`      | Readiness probe: reads the heading, `503` if the rotator can't be reached |
 
 ### Examples
 ```bash
@@ -160,13 +184,18 @@ curl http://localhost:8080/api/v1/list-ports
 
 curl http://localhost:8080/api/v1/healthz
 # {"status":"ok","mode":"hardware","connected":true,"version":"1.2.0"}
+
+curl http://localhost:8080/api/v1/readyz
+# {"status":"ready","heading":180}
 ```
 
-`healthz` always returns `200` while the process is alive; monitors should alert on `"mode":"simulation"` or `"connected":false` if they expect real hardware.
+`healthz` always returns `200` while the process is alive, and `connected` only means the serial port is open. To monitor a remote station, poll `readyz` instead: it actually reads the heading, so it returns `503` with an `error` whenever the rotator isn't answering, whether the adapter is unplugged, the controller is powered off, or the cable is loose. Polling it also reconnects a dropped port.
 
 ### Calibration offset
 
 If the rotator is mechanically mounted so its own zero point doesn't line up with true heading (a common real-world install error), set `ROTATOR_HEADING_OFFSET` or `POST /api/v1/offset` so requested headings point where you actually expect: `real-world heading = raw rotator heading + offset (mod 360)`. It's applied to every `set-heading`/`get-heading` call, in both hardware and simulation mode, and can be tuned live via the API while comparing the antenna's actual physical heading to what it reports — no server restart or hardware command required, since it's a pure software translation layer.
+
+Set `ROTATOR_OFFSET_FILE` (the systemd unit does this for you) and every `POST /offset` is saved to that file and reloaded on startup, so calibration survives reboots and power cuts. Once a value has been saved it takes precedence over `ROTATOR_HEADING_OFFSET`; delete the file to fall back to the env var. If the file can't be written, `POST /offset` still applies the offset but returns `500` so you know it won't persist.
 
 ---
 
@@ -211,25 +240,25 @@ Serial access is fully serialized (concurrent HTTP requests can't interleave com
 ## Development
 
 ```bash
-make build         # build the binary into ./bin (version-stamped from git)
-make build-windows # cross-compile a Windows .exe into ./bin
-make test          # go test -race ./...
-make vet       # go vet ./...
-make lint      # golangci-lint run
-make run-sim   # build and run in simulation mode
-make clean     # remove build artifacts
+go build -o antenna-rotator-server .   # build; the version comes from git automatically
+go test -race ./...                    # tests with the race detector
+go vet ./...
+golangci-lint run                      # lint (CI uses v2.12.2)
+SIMULATION=true go run .               # run against the simulated rotator
 ```
 
-CI (GitHub Actions) runs vet, the race-enabled test suite, golangci-lint, and a multi-arch Docker build on every push and pull request.
+`/healthz` reports the version Go records at build time: the tag (e.g. `v1.0.0`) when you build a tagged commit, otherwise the commit, plus `+dirty` if you have uncommitted changes. `go run` reports `dev`.
+
+CI (GitHub Actions) runs vet, the race-enabled test suite, and golangci-lint on every push and pull request.
 
 ## Project layout
 ```
 .
 ├── main.go                  # entry point: config, logging, graceful shutdown
+├── offsetfile.go            # saves/loads the calibration offset
 ├── rotator-server/          # HTTP server, Swagger UI, OpenAPI spec
 │   └── static/              # embedded swagger.html + openapi.yaml
-├── rotator-controller/      # serial-port rotator driver (Prosistel)
-├── .github/workflows/       # CI: vet, race tests, lint, docker build
-├── Dockerfile               # multi-stage, multi-arch scratch image
-└── Makefile                 # build/test/docker helpers
+├── rotator-controller/      # serial-port rotator driver (Prosistel, Yaesu GS-232)
+├── deploy/                  # systemd unit + example env file
+└── .github/workflows/       # CI: vet, race tests, lint
 ```

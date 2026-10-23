@@ -2,8 +2,10 @@ package server
 
 import (
 	controller "antenna-rotator-server/rotator-controller"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -331,5 +333,93 @@ func TestSerialFailuresReturn502(t *testing.T) {
 	}
 	if h.Mode != "hardware" || h.Connected {
 		t.Fatalf("healthz: got %+v, want mode=hardware connected=false", h)
+	}
+}
+
+func TestReadyz(t *testing.T) {
+	for _, path := range []string{"/readyz", "/api/v1/readyz"} {
+		rr := dispatch(t, "GET", path)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s: expected 200; got %d (%s)", path, rr.Code, rr.Body.String())
+		}
+		var r readyBody
+		if err := json.Unmarshal(rr.Body.Bytes(), &r); err != nil {
+			t.Fatalf("%s: body not JSON: %v (%q)", path, err, rr.Body.String())
+		}
+		if r.Status != "ready" || r.Heading == nil || *r.Heading != 0 || r.Error != "" {
+			t.Fatalf("%s: got %+v, want status=ready heading=0", path, r)
+		}
+	}
+}
+
+func TestReadyzReportsBrokenLink(t *testing.T) {
+	srv := New(Config{Rotator: brokenRotator{}})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest("GET", "/readyz", nil))
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503; got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var r readyBody
+	if err := json.Unmarshal(rr.Body.Bytes(), &r); err != nil {
+		t.Fatalf("body not JSON: %v", err)
+	}
+	if r.Status != "unavailable" || r.Heading != nil || r.Error == "" {
+		t.Fatalf("got %+v, want status=unavailable with an error and no heading", r)
+	}
+}
+
+func TestOffsetIsSaved(t *testing.T) {
+	saved := -1
+	srv := New(Config{
+		Rotator:    controller.NewSimulationController(),
+		SaveOffset: func(offset int) error { saved = offset; return nil },
+	})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest("POST", "/offset?offset=-5", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200; got %d (%s)", rr.Code, rr.Body.String())
+	}
+	if saved != 355 {
+		t.Fatalf("SaveOffset got %d, want 355 (the normalised value)", saved)
+	}
+}
+
+func TestOffsetSaveFailureIs500(t *testing.T) {
+	srv := New(Config{
+		Rotator:    controller.NewSimulationController(),
+		SaveOffset: func(int) error { return fmt.Errorf("read-only file system") },
+	})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest("POST", "/offset?offset=15", nil))
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500; got %d (%s)", rr.Code, rr.Body.String())
+	}
+	var e errorBody
+	if err := json.Unmarshal(rr.Body.Bytes(), &e); err != nil || !strings.Contains(e.Error, "not saved") {
+		t.Fatalf("expected a 'not saved' error body; got %q", rr.Body.String())
+	}
+}
+
+func TestReadsLoggedAtDebugActionsAtInfo(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	srv := newTestServer(t)
+	for _, req := range []*http.Request{
+		httptest.NewRequest("GET", "/api/v1/get-heading", nil),
+		httptest.NewRequest("GET", "/api/v1/readyz", nil),
+		httptest.NewRequest("POST", "/api/v1/set-heading?heading=90", nil),
+	} {
+		srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	logs := buf.String()
+	if strings.Contains(logs, "get-heading") || strings.Contains(logs, "readyz") {
+		t.Errorf("reads should be logged at debug, hidden at info; got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "set-heading") {
+		t.Errorf("actions should be logged at info; got:\n%s", logs)
 	}
 }

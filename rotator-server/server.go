@@ -35,6 +35,11 @@ type Config struct {
 	Addr    string // listen address, e.g. ":8080"
 	Rotator Rotator
 	Version string // reported by /healthz
+
+	// SaveOffset, if set, persists the calibration offset after every
+	// POST /offset so it survives a restart. It receives the normalised
+	// value.
+	SaveOffset func(offset int) error
 }
 
 type Server struct {
@@ -69,6 +74,12 @@ type healthBody struct {
 	Protocol  string `json:"protocol"`
 	Connected bool   `json:"connected"`
 	Version   string `json:"version"`
+}
+
+type readyBody struct {
+	Status  string `json:"status"`
+	Heading *int   `json:"heading,omitempty"` // pointer: 0 is a valid heading
+	Error   string `json:"error,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -171,6 +182,13 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config) {
 			return
 		}
 		rotator.SetOffset(off)
+		if cfg.SaveOffset != nil {
+			if err := cfg.SaveOffset(rotator.Offset()); err != nil {
+				writeError(w, http.StatusInternalServerError,
+					fmt.Sprintf("offset applied but not saved, it will be lost on restart: %v", err))
+				return
+			}
+		}
 		writeJSON(w, http.StatusOK, offsetBody{Offset: rotator.Offset(), Status: "set"})
 	})
 
@@ -194,6 +212,18 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config) {
 			Connected: rotator.Connected(),
 			Version:   cfg.Version,
 		})
+	})
+
+	// readyz proves the whole chain works by actually reading the heading,
+	// unlike healthz, which only reports whether the port is open. Reading
+	// also reopens a dropped port, so polling it doubles as a reconnect.
+	handle("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		heading, err := rotator.GetHeading()
+		if err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, readyBody{Status: "unavailable", Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, readyBody{Status: "ready", Heading: &heading})
 	})
 }
 
@@ -296,8 +326,9 @@ func (sr *statusRecorder) WriteHeader(code int) {
 	sr.ResponseWriter.WriteHeader(code)
 }
 
-// requestLogger logs one line per request via slog. Health probes are logged
-// at Debug so they don't drown out real traffic.
+// requestLogger logs one line per request via slog. Reads (GET/HEAD) are
+// logged at Debug: clients like Node-RED poll get-heading and readyz every
+// few seconds, which would otherwise bury the actions that move the antenna.
 func requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -305,7 +336,7 @@ func requestLogger(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 
 		level := slog.LevelInfo
-		if strings.HasSuffix(r.URL.Path, "/healthz") {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			level = slog.LevelDebug
 		}
 		slog.LogAttrs(r.Context(), level, "request",

@@ -130,7 +130,9 @@ paths:
         Applies to all subsequent set-heading/get-heading calls. Pass the
         offset either as the `offset` query parameter or as a JSON body. Any
         integer is accepted and normalised modulo 360; takes effect
-        immediately, with no hardware command sent.
+        immediately, with no hardware command sent. When the server runs
+        with `ROTATOR_OFFSET_FILE` set, the offset is saved there and
+        survives a restart.
       parameters:
         - in: query
           name: offset
@@ -164,6 +166,14 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "405":
           $ref: "#/components/responses/MethodNotAllowed"
+        "500":
+          description: Offset applied in memory but could not be saved to `ROTATOR_OFFSET_FILE`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+              example:
+                error: "offset applied but not saved, it will be lost on restart: permission denied"
   /list-ports:
     get:
       tags: [system]
@@ -203,6 +213,36 @@ paths:
                 protocol: yaesu-gs232
                 connected: true
                 version: "1.2.0"
+  /readyz:
+    get:
+      tags: [system]
+      summary: Readiness probe
+      description: |
+        Reads the heading from the rotator to prove the whole chain works:
+        server, serial port and controller. Returns 503 if the read fails.
+        A dropped serial port is reopened as part of the read, so polling
+        this endpoint also reconnects.
+      responses:
+        "200":
+          description: The rotator answered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+              example:
+                status: ready
+                heading: 180
+        "405":
+          $ref: "#/components/responses/MethodNotAllowed"
+        "503":
+          description: The rotator could not be read.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadyResponse"
+              example:
+                status: unavailable
+                error: "failed to read heading: timeout: no response from rotator"
 components:
   schemas:
     HeadingResponse:
@@ -266,6 +306,21 @@ components:
         version:
           type: string
           description: Build version of the running server.
+    ReadyResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ready, unavailable]
+        heading:
+          type: integer
+          minimum: 0
+          maximum: 359
+          description: Current azimuth in degrees (only when ready).
+        error:
+          type: string
+          description: Why the rotator could not be read (only when unavailable).
     Error:
       type: object
       required: [error]

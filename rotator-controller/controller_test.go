@@ -1,10 +1,12 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.bug.st/serial"
 )
@@ -334,5 +336,101 @@ func TestErrorWhenReconnectAlsoFails(t *testing.T) {
 	}
 	if rc.Connected() {
 		t.Error("controller should report disconnected after failed reconnect")
+	}
+}
+
+func TestNewRotatorControllerRejectsUnknownProtocol(t *testing.T) {
+	if _, err := NewRotatorController("FAKE", Options{Protocol: "nope"}); err == nil {
+		t.Fatal("expected error for unsupported protocol")
+	}
+}
+
+func TestStartsDisconnectedAndConnectsWhenPortAppears(t *testing.T) {
+	fp := newFakePort()
+	fp.responses["\x02A?\r"] = []byte("\x02A,?,090,R\r")
+
+	present := false
+	rc := &RotatorController{
+		portName: "FAKE",
+		proto:    mustProtocol("prosistel"),
+		open: func(string) (serial.Port, error) {
+			if !present {
+				return nil, fmt.Errorf("no such device")
+			}
+			return fp, nil
+		},
+	}
+
+	if err := rc.Connect(); err == nil {
+		t.Fatal("Connect: expected error while the port is missing")
+	}
+	if rc.Connected() {
+		t.Error("controller should report disconnected while the port is missing")
+	}
+	if _, err := rc.GetHeading(); err == nil {
+		t.Fatal("GetHeading: expected error while the port is missing")
+	}
+
+	present = true // USB adapter finishes enumerating
+	h, err := rc.GetHeading()
+	if err != nil {
+		t.Fatalf("GetHeading should succeed once the port appears: %v", err)
+	}
+	if h != 90 {
+		t.Errorf("got %d, want 90", h)
+	}
+	if !rc.Connected() {
+		t.Error("controller should report connected once the port appears")
+	}
+	if err := rc.Connect(); err != nil {
+		t.Errorf("Connect on an open port should be a no-op: %v", err)
+	}
+}
+
+func TestSilentControllerIsNotRetried(t *testing.T) {
+	fp := newFakePort() // port works, but nothing ever answers
+	opened := 0
+	rc := &RotatorController{
+		portName: "FAKE",
+		proto:    mustProtocol("prosistel"),
+		open: func(string) (serial.Port, error) {
+			opened++
+			return fp, nil
+		},
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := rc.GetHeading(); !errors.Is(err, errNoResponse) {
+			t.Fatalf("GetHeading #%d: got %v, want errNoResponse", i+1, err)
+		}
+	}
+	if got := strings.Count(fp.writtenString(), "\x02A?\r"); got != 2 {
+		t.Errorf("sent the query %d times for 2 requests, want 2 (a timeout must not be retried)", got)
+	}
+	if opened != 1 {
+		t.Errorf("opened the port %d times, want 1 (a timeout must not reopen it)", opened)
+	}
+	if !rc.Connected() {
+		t.Error("controller should still report connected: the port itself is fine")
+	}
+}
+
+func TestConnectedDoesNotWaitForLock(t *testing.T) {
+	rc := newFakeController("prosistel", newFakePort())
+	if err := rc.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	rc.mu.Lock() // a slow serial exchange is in progress
+	defer rc.mu.Unlock()
+
+	done := make(chan bool)
+	go func() { done <- rc.Connected() }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Error("Connected: got false, want true")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Connected blocked while the lock was held")
 	}
 }
