@@ -86,14 +86,14 @@ All configuration is via environment variables:
 | `ROTATOR_OFFSET_FILE` | —        | File where `POST /offset` saves the offset so it survives restarts. A saved value takes precedence over `ROTATOR_HEADING_OFFSET`. Unset means offsets set via the API are lost on restart. |
 | `SIMULATION`       | `false`     | `true` runs an in-memory rotator, no hardware needed.               |
 | `LISTEN_ADDR`      | `:8080`     | HTTP listen address.                                                |
-| `LOG_LEVEL`        | `info`      | `debug`, `info`, `warn`, or `error`.                                |
+| `LOG_LEVEL`        | `info`      | `debug`, `info`, `warn`, or `error`. Read requests (`GET`) such as Node-RED polling are logged at `debug`, so they only show up there. |
 | `LOG_FORMAT`       | `text`      | `json` for structured JSON logs.                                    |
 
 The server shuts down gracefully on `SIGINT`/`SIGTERM`, draining in-flight requests (10s budget) and closing the serial port.
 
 ### Run as a service (Raspberry Pi / Linux)
 
-For an unattended station, build on the Pi and install the bundled systemd unit. You need Go 1.24 or newer from <https://go.dev/dl/>; the `golang` package in Debian/Raspberry Pi OS is too old.
+For an unattended station, build on the Pi and install the bundled systemd unit. You need Go 1.26 or newer from <https://go.dev/dl/>; the `golang` package in Debian/Raspberry Pi OS is too old.
 ```bash
 go build -o antenna-rotator-server .
 sudo install -m 0755 antenna-rotator-server /usr/local/bin/

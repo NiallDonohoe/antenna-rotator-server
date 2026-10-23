@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -50,7 +51,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		slog.Info("listening", "addr", srv.Addr(), "swagger", "http://localhost"+srv.Addr()+"/swagger/")
+		slog.Info("listening", "addr", srv.Addr(), "swagger", swaggerURL(srv.Addr()))
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -157,6 +158,20 @@ func initialOffset(offsetFile string) (int, error) {
 		return v, nil
 	}
 	return 0, nil
+}
+
+// swaggerURL turns a listen address into a clickable Swagger UI link for the
+// startup log. A wildcard bind like ":8080" or "0.0.0.0:8080" becomes
+// localhost; a specific IP is kept.
+func swaggerURL(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "http://" + addr + "/swagger/"
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = "localhost"
+	}
+	return "http://" + net.JoinHostPort(host, port) + "/swagger/"
 }
 
 func listenAddr() string {

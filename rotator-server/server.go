@@ -326,8 +326,9 @@ func (sr *statusRecorder) WriteHeader(code int) {
 	sr.ResponseWriter.WriteHeader(code)
 }
 
-// requestLogger logs one line per request via slog. Health and readiness
-// probes are logged at Debug so they don't drown out real traffic.
+// requestLogger logs one line per request via slog. Reads (GET/HEAD) are
+// logged at Debug: clients like Node-RED poll get-heading and readyz every
+// few seconds, which would otherwise bury the actions that move the antenna.
 func requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -335,7 +336,7 @@ func requestLogger(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 
 		level := slog.LevelInfo
-		if strings.HasSuffix(r.URL.Path, "/healthz") || strings.HasSuffix(r.URL.Path, "/readyz") {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			level = slog.LevelDebug
 		}
 		slog.LogAttrs(r.Context(), level, "request",

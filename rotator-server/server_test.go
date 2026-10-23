@@ -2,8 +2,10 @@ package server
 
 import (
 	controller "antenna-rotator-server/rotator-controller"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -395,5 +397,29 @@ func TestOffsetSaveFailureIs500(t *testing.T) {
 	var e errorBody
 	if err := json.Unmarshal(rr.Body.Bytes(), &e); err != nil || !strings.Contains(e.Error, "not saved") {
 		t.Fatalf("expected a 'not saved' error body; got %q", rr.Body.String())
+	}
+}
+
+func TestReadsLoggedAtDebugActionsAtInfo(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	srv := newTestServer(t)
+	for _, req := range []*http.Request{
+		httptest.NewRequest("GET", "/api/v1/get-heading", nil),
+		httptest.NewRequest("GET", "/api/v1/readyz", nil),
+		httptest.NewRequest("POST", "/api/v1/set-heading?heading=90", nil),
+	} {
+		srv.Handler().ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	logs := buf.String()
+	if strings.Contains(logs, "get-heading") || strings.Contains(logs, "readyz") {
+		t.Errorf("reads should be logged at debug, hidden at info; got:\n%s", logs)
+	}
+	if !strings.Contains(logs, "set-heading") {
+		t.Errorf("actions should be logged at info; got:\n%s", logs)
 	}
 }

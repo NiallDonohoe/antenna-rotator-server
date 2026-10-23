@@ -1,10 +1,12 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"go.bug.st/serial"
 )
@@ -382,5 +384,53 @@ func TestStartsDisconnectedAndConnectsWhenPortAppears(t *testing.T) {
 	}
 	if err := rc.Connect(); err != nil {
 		t.Errorf("Connect on an open port should be a no-op: %v", err)
+	}
+}
+
+func TestSilentControllerIsNotRetried(t *testing.T) {
+	fp := newFakePort() // port works, but nothing ever answers
+	opened := 0
+	rc := &RotatorController{
+		portName: "FAKE",
+		proto:    mustProtocol("prosistel"),
+		open: func(string) (serial.Port, error) {
+			opened++
+			return fp, nil
+		},
+	}
+
+	for i := 0; i < 2; i++ {
+		if _, err := rc.GetHeading(); !errors.Is(err, errNoResponse) {
+			t.Fatalf("GetHeading #%d: got %v, want errNoResponse", i+1, err)
+		}
+	}
+	if got := strings.Count(fp.writtenString(), "\x02A?\r"); got != 2 {
+		t.Errorf("sent the query %d times for 2 requests, want 2 (a timeout must not be retried)", got)
+	}
+	if opened != 1 {
+		t.Errorf("opened the port %d times, want 1 (a timeout must not reopen it)", opened)
+	}
+	if !rc.Connected() {
+		t.Error("controller should still report connected: the port itself is fine")
+	}
+}
+
+func TestConnectedDoesNotWaitForLock(t *testing.T) {
+	rc := newFakeController("prosistel", newFakePort())
+	if err := rc.Connect(); err != nil {
+		t.Fatal(err)
+	}
+	rc.mu.Lock() // a slow serial exchange is in progress
+	defer rc.mu.Unlock()
+
+	done := make(chan bool)
+	go func() { done <- rc.Connected() }()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Error("Connected: got false, want true")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Connected blocked while the lock was held")
 	}
 }

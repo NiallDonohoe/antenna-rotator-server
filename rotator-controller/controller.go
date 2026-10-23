@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.bug.st/serial"
@@ -18,6 +19,10 @@ const (
 // ErrInvalidHeading marks a caller error (heading out of range). Callers can
 // use errors.Is to distinguish it from serial I/O failures.
 var ErrInvalidHeading = errors.New("invalid heading")
+
+// errNoResponse means the port is fine but the controller didn't answer
+// (powered off, cable loose). Reopening the port can't fix that.
+var errNoResponse = errors.New("timeout: no response from rotator")
 
 // Options configures a hardware controller.
 type Options struct {
@@ -39,6 +44,7 @@ type RotatorController struct {
 	simulated bool
 	portName  string
 	port      serial.Port  // nil when disconnected (hardware mode) or simulated
+	connected atomic.Bool  // mirrors port != nil so Connected never waits on mu
 	heading   int          // simulation mode only; otherwise the last-read raw value is not cached
 	offset    int          // calibration offset: real-world heading = raw rotator heading + offset
 	proto     ProtocolSpec // zero value in simulation mode
@@ -135,14 +141,13 @@ func (rc *RotatorController) Protocol() string {
 }
 
 // Connected reports whether the serial port is currently open. Simulation
-// controllers always report true.
+// controllers always report true. It doesn't take the lock, so health checks
+// answer immediately even while a slow serial exchange is in progress.
 func (rc *RotatorController) Connected() bool {
 	if rc.simulated {
 		return true
 	}
-	rc.mu.Lock()
-	defer rc.mu.Unlock()
-	return rc.port != nil
+	return rc.connected.Load()
 }
 
 // SetHeading rotates to the given real-world heading (0–359 degrees). The
@@ -161,7 +166,7 @@ func (rc *RotatorController) SetHeading(deg int) error {
 		return nil
 	}
 	if _, err := rc.transactLocked(rc.proto.setHeadingCmd(raw), false); err != nil {
-		return fmt.Errorf("failed to send set-heading command: %v", err)
+		return fmt.Errorf("failed to send set-heading command: %w", err)
 	}
 	return nil
 }
@@ -176,7 +181,7 @@ func (rc *RotatorController) GetHeading() (int, error) {
 	}
 	resp, err := rc.transactLocked(rc.proto.GetHeadingCmd, true)
 	if err != nil {
-		return 0, fmt.Errorf("failed to read heading: %v", err)
+		return 0, fmt.Errorf("failed to read heading: %w", err)
 	}
 	raw, err := rc.proto.parseHeading(resp)
 	if err != nil {
@@ -220,7 +225,7 @@ func (rc *RotatorController) Stop() error {
 		return nil
 	}
 	if _, err := rc.transactLocked(rc.proto.StopCmd, false); err != nil {
-		return fmt.Errorf("failed to send stop command: %v", err)
+		return fmt.Errorf("failed to send stop command: %w", err)
 	}
 	return nil
 }
@@ -238,6 +243,7 @@ func (rc *RotatorController) connectLocked() error {
 		return fmt.Errorf("could not open serial port %s: %v", rc.portName, err)
 	}
 	rc.port = p
+	rc.connected.Store(true)
 	return nil
 }
 
@@ -246,12 +252,16 @@ func (rc *RotatorController) dropPortLocked() {
 		_ = rc.port.Close()
 		rc.port = nil
 	}
+	rc.connected.Store(false)
 }
 
 // transactLocked sends one command and, when expectReply is set, reads one
 // CR/LF-terminated response line. On an I/O failure it drops the port,
 // reopens it and retries once, so a replugged USB adapter recovers without a
-// server restart. Callers must hold rc.mu.
+// server restart. A controller that simply doesn't answer is reported
+// straight away: the port is healthy, so retrying would only double the wait
+// (an unplugged adapter shows up as an I/O error, not a silent timeout).
+// Callers must hold rc.mu.
 func (rc *RotatorController) transactLocked(cmd string, expectReply bool) (string, error) {
 	var lastErr error
 	for attempt := 0; attempt < 2; attempt++ {
@@ -266,6 +276,9 @@ func (rc *RotatorController) transactLocked(cmd string, expectReply bool) (strin
 		resp, err := rc.tryTransactLocked(cmd, expectReply)
 		if err == nil {
 			return resp, nil
+		}
+		if errors.Is(err, errNoResponse) {
+			return "", err
 		}
 		lastErr = err
 		rc.dropPortLocked()
@@ -307,7 +320,7 @@ func readLine(p serial.Port) (string, error) {
 		// n == 0, err == nil means the read timeout fired with no data.
 		if n == 0 {
 			if sb.Len() == 0 {
-				return "", fmt.Errorf("timeout: no response from rotator")
+				return "", errNoResponse
 			}
 			break
 		}
