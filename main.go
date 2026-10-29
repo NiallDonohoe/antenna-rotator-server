@@ -23,6 +23,12 @@ var version = buildVersion()
 const shutdownTimeout = 10 * time.Second
 
 func main() {
+	os.Exit(run())
+}
+
+// run is main without the os.Exit, so its deferred cleanup (closing the
+// serial port) runs on every path out. It returns the exit code.
+func run() int {
 	setupLogging()
 	slog.Info("starting antenna-rotator-server", "version", version)
 
@@ -30,7 +36,7 @@ func main() {
 	rotator, err := buildRotator(offsetFile)
 	if err != nil {
 		slog.Error("startup failed", "error", err)
-		os.Exit(1)
+		return 1
 	}
 	defer rotator.Close()
 
@@ -59,7 +65,7 @@ func main() {
 	case err := <-errCh:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server failed", "error", err)
-			os.Exit(1)
+			return 1
 		}
 	case <-ctx.Done():
 		slog.Info("shutdown signal received, draining requests", "timeout", shutdownTimeout)
@@ -70,6 +76,7 @@ func main() {
 		}
 	}
 	slog.Info("server stopped")
+	return 0
 }
 
 // buildRotator picks the controller from the environment:

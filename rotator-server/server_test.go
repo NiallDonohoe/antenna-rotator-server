@@ -3,13 +3,16 @@ package server
 import (
 	controller "antenna-rotator-server/rotator-controller"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -286,14 +289,16 @@ func TestMethodNotAllowed(t *testing.T) {
 // brokenRotator simulates a rotator whose serial link is down.
 type brokenRotator struct{}
 
-func (brokenRotator) SetHeading(int) error     { return fmt.Errorf("serial write failed") }
-func (brokenRotator) GetHeading() (int, error) { return 0, fmt.Errorf("serial read failed") }
-func (brokenRotator) Stop() error              { return fmt.Errorf("serial write failed") }
-func (brokenRotator) Mode() string             { return "hardware" }
-func (brokenRotator) Protocol() string         { return "prosistel" }
-func (brokenRotator) Connected() bool          { return false }
-func (brokenRotator) Offset() int              { return 0 }
-func (brokenRotator) SetOffset(int)            {}
+func (brokenRotator) SetHeading(context.Context, int) error { return fmt.Errorf("serial write failed") }
+func (brokenRotator) GetHeading(context.Context) (int, error) {
+	return 0, fmt.Errorf("serial read failed")
+}
+func (brokenRotator) Stop(context.Context) error { return fmt.Errorf("serial write failed") }
+func (brokenRotator) Mode() string               { return "hardware" }
+func (brokenRotator) Protocol() string           { return "prosistel" }
+func (brokenRotator) Connected() bool            { return false }
+func (brokenRotator) Offset() int                { return 0 }
+func (brokenRotator) SetOffset(int)              {}
 
 func TestSerialFailuresReturn502(t *testing.T) {
 	srv := New(Config{Rotator: brokenRotator{}})
@@ -421,5 +426,67 @@ func TestReadsLoggedAtDebugActionsAtInfo(t *testing.T) {
 	}
 	if !strings.Contains(logs, "set-heading") {
 		t.Errorf("actions should be logged at info; got:\n%s", logs)
+	}
+}
+
+// busyRotator never gets the serial port: every call waits until its
+// context gives up.
+type busyRotator struct{ brokenRotator }
+
+func (busyRotator) SetHeading(ctx context.Context, _ int) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (busyRotator) GetHeading(ctx context.Context) (int, error) {
+	<-ctx.Done()
+	return 0, ctx.Err()
+}
+func (busyRotator) Stop(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestRequestsGiveUpWhenClientLeaves(t *testing.T) {
+	srv := New(Config{Rotator: busyRotator{}})
+	for _, tc := range []struct{ method, target string }{
+		{"POST", "/set-heading?heading=90"},
+		{"GET", "/get-heading"},
+		{"POST", "/stop"},
+	} {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel() // the client has disconnected
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, httptest.NewRequestWithContext(ctx, tc.method, tc.target, nil))
+		if rr.Code != http.StatusServiceUnavailable {
+			t.Errorf("%s %s: got %d, want 503", tc.method, tc.target, rr.Code)
+		}
+	}
+}
+
+func TestOverlappingOffsetUpdatesSaveTheOffsetInUse(t *testing.T) {
+	rotator := controller.NewSimulationController()
+	var mu sync.Mutex
+	saved := -1
+	srv := New(Config{
+		Rotator: rotator,
+		SaveOffset: func(offset int) error {
+			time.Sleep(time.Millisecond) // widen the window a race would need
+			mu.Lock()
+			saved = offset
+			mu.Unlock()
+			return nil
+		},
+	})
+
+	var wg sync.WaitGroup
+	for i := range 20 {
+		wg.Go(func() {
+			rr := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rr, httptest.NewRequest("POST", fmt.Sprintf("/offset?offset=%d", i), nil))
+		})
+	}
+	wg.Wait()
+	if saved != rotator.Offset() {
+		t.Fatalf("saved offset %d, but the offset in use is %d", saved, rotator.Offset())
 	}
 }

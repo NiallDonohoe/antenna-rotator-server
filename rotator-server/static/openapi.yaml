@@ -56,7 +56,9 @@ paths:
                   example: 180
       responses:
         "200":
-          description: Heading accepted and command dispatched.
+          description: |
+            Command sent. With the Prosistel protocol the controller has also
+            acknowledged it; a rejection or missing acknowledgement is a 502.
           content:
             application/json:
               schema:
@@ -70,6 +72,8 @@ paths:
           $ref: "#/components/responses/MethodNotAllowed"
         "502":
           $ref: "#/components/responses/RotatorUnavailable"
+        "503":
+          $ref: "#/components/responses/RotatorBusy"
   /get-heading:
     get:
       tags: [rotator]
@@ -87,13 +91,23 @@ paths:
           $ref: "#/components/responses/MethodNotAllowed"
         "502":
           $ref: "#/components/responses/RotatorUnavailable"
+        "503":
+          $ref: "#/components/responses/RotatorBusy"
   /stop:
     post:
       tags: [rotator]
       summary: Stop any in-progress rotation
+      description: |
+        Sends the protocol's stop command. For Prosistel this is the soft
+        stop (`G997`), which ramps the motor down if PWM is enabled on the
+        controller and stops it dead otherwise. Yaesu GS-232 has only an
+        immediate stop (`S`).
       responses:
         "200":
-          description: Stop command dispatched.
+          description: |
+            Stop command sent. With the Prosistel protocol the controller has
+            also acknowledged it; a rejection or missing acknowledgement is a
+            502.
           content:
             application/json:
               schema:
@@ -104,6 +118,8 @@ paths:
           $ref: "#/components/responses/MethodNotAllowed"
         "502":
           $ref: "#/components/responses/RotatorUnavailable"
+        "503":
+          $ref: "#/components/responses/RotatorBusy"
   /offset:
     get:
       tags: [rotator]
@@ -352,10 +368,18 @@ components:
           example:
             error: could not list serial ports
     RotatorUnavailable:
-      description: Serial communication with the rotator failed (device unplugged, timeout, etc.).
+      description: Serial communication with the rotator failed (device unplugged, timeout, command rejected, etc.).
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
           example:
             error: "failed to read heading: timeout: no response from rotator"
+    RotatorBusy:
+      description: The request gave up waiting for the serial port (10 seconds, or the client disconnected).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "rotator busy: gave up waiting for the serial port"

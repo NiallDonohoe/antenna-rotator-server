@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,7 +26,7 @@ func TestSimulationMode(t *testing.T) {
 	}
 
 	// Default heading before any set
-	h, err := rc.GetHeading()
+	h, err := rc.GetHeading(t.Context())
 	if err != nil {
 		t.Fatalf("GetHeading error: %v", err)
 	}
@@ -33,10 +34,10 @@ func TestSimulationMode(t *testing.T) {
 		t.Errorf("default heading: got %d, want 0", h)
 	}
 
-	if err := rc.SetHeading(270); err != nil {
+	if err := rc.SetHeading(t.Context(), 270); err != nil {
 		t.Fatalf("SetHeading error: %v", err)
 	}
-	h, err = rc.GetHeading()
+	h, err = rc.GetHeading(t.Context())
 	if err != nil {
 		t.Fatalf("GetHeading error: %v", err)
 	}
@@ -45,7 +46,7 @@ func TestSimulationMode(t *testing.T) {
 	}
 
 	for _, deg := range []int{-1, 360, 1000} {
-		err := rc.SetHeading(deg)
+		err := rc.SetHeading(t.Context(), deg)
 		if err == nil {
 			t.Errorf("SetHeading(%d): expected error for out-of-range heading", deg)
 		}
@@ -59,10 +60,10 @@ func TestHeadingOffsetRoundTrips(t *testing.T) {
 		t.Errorf("Offset(): got %d, want 10", got)
 	}
 
-	if err := rc.SetHeading(100); err != nil {
+	if err := rc.SetHeading(t.Context(), 100); err != nil {
 		t.Fatalf("SetHeading: %v", err)
 	}
-	h, err := rc.GetHeading()
+	h, err := rc.GetHeading(t.Context())
 	if err != nil {
 		t.Fatalf("GetHeading: %v", err)
 	}
@@ -90,13 +91,13 @@ func TestSimulationConcurrentAccess(t *testing.T) {
 		wg.Add(2)
 		go func(deg int) {
 			defer wg.Done()
-			if err := rc.SetHeading(deg % 360); err != nil {
+			if err := rc.SetHeading(t.Context(), deg%360); err != nil {
 				t.Errorf("SetHeading: %v", err)
 			}
 		}(i * 30)
 		go func() {
 			defer wg.Done()
-			if _, err := rc.GetHeading(); err != nil {
+			if _, err := rc.GetHeading(t.Context()); err != nil {
 				t.Errorf("GetHeading: %v", err)
 			}
 		}()
@@ -178,34 +179,32 @@ func mustProtocol(name string) ProtocolSpec {
 // newFakeController wires a controller for the named protocol to the given
 // fake port; the port is opened lazily on the first operation.
 func newFakeController(protocolName string, fp serial.Port) *RotatorController {
-	return &RotatorController{
-		portName: "FAKE",
-		proto:    mustProtocol(protocolName),
-		open:     func(string) (serial.Port, error) { return fp, nil },
-	}
+	return newHardwareController("FAKE", mustProtocol(protocolName), func(string) (serial.Port, error) { return fp, nil })
 }
 
 func TestSetHeadingWritesCommand(t *testing.T) {
 	fp := newFakePort()
+	fp.responses["\x02AG90\r"] = []byte("\x02A,?,045,R\r")
 	rc := newFakeController("prosistel", fp)
-	if err := rc.SetHeading(90); err != nil {
+	if err := rc.SetHeading(t.Context(), 90); err != nil {
 		t.Fatalf("SetHeading: %v", err)
 	}
 	if got := fp.writtenString(); got != "\x02AG90\r" {
 		t.Errorf("wrote %q, want %q", got, "\x02AG90\r")
 	}
-	if err := rc.SetHeading(400); err == nil {
+	if err := rc.SetHeading(t.Context(), 400); err == nil {
 		t.Error("SetHeading(400): expected validation error")
 	}
 }
 
 func TestSetHeadingSubtractsOffsetFromRawCommand(t *testing.T) {
 	fp := newFakePort()
+	fp.responses["\x02AG355\r"] = []byte("\x02A,?,045,R\r")
 	rc := newFakeController("prosistel", fp)
 	rc.SetOffset(10)
 	// Desired real-world heading 5; raw command sent to the rotator should
 	// be mod360(5-10) = 355, wrapping around zero.
-	if err := rc.SetHeading(5); err != nil {
+	if err := rc.SetHeading(t.Context(), 5); err != nil {
 		t.Fatalf("SetHeading: %v", err)
 	}
 	if got := fp.writtenString(); got != "\x02AG355\r" {
@@ -218,7 +217,7 @@ func TestGetHeadingAddsOffsetToRawReading(t *testing.T) {
 	fp.responses["\x02A?\r"] = []byte("\x02A,?,350,R\r")
 	rc := newFakeController("prosistel", fp)
 	rc.SetOffset(10)
-	h, err := rc.GetHeading()
+	h, err := rc.GetHeading(t.Context())
 	if err != nil {
 		t.Fatalf("GetHeading: %v", err)
 	}
@@ -231,7 +230,7 @@ func TestGetHeadingParsesResponse(t *testing.T) {
 	fp := newFakePort()
 	fp.responses["\x02A?\r"] = []byte("\x02A,?,123,R\r")
 	rc := newFakeController("prosistel", fp)
-	h, err := rc.GetHeading()
+	h, err := rc.GetHeading(t.Context())
 	if err != nil {
 		t.Fatalf("GetHeading: %v", err)
 	}
@@ -245,7 +244,7 @@ func TestGetHeadingFlushesStaleBytes(t *testing.T) {
 	fp.pending = []byte("\x02A,?,007,R\r") // leftover reply from an earlier command
 	fp.responses["\x02A?\r"] = []byte("\x02A,?,123,R\r")
 	rc := newFakeController("prosistel", fp)
-	h, err := rc.GetHeading()
+	h, err := rc.GetHeading(t.Context())
 	if err != nil {
 		t.Fatalf("GetHeading: %v", err)
 	}
@@ -257,7 +256,7 @@ func TestGetHeadingFlushesStaleBytes(t *testing.T) {
 func TestGetHeadingTimeout(t *testing.T) {
 	fp := newFakePort() // no scripted response → read timeout
 	rc := newFakeController("prosistel", fp)
-	_, err := rc.GetHeading()
+	_, err := rc.GetHeading(t.Context())
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
@@ -266,12 +265,14 @@ func TestGetHeadingTimeout(t *testing.T) {
 	}
 }
 
-func TestStopWritesCommand(t *testing.T) {
+func TestStopSendsSoftStop(t *testing.T) {
 	fp := newFakePort()
+	fp.responses["\x02AG997\r"] = []byte("\x02A,?,045,R\r")
 	rc := newFakeController("prosistel", fp)
-	if err := rc.Stop(); err != nil {
+	if err := rc.Stop(t.Context()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
+	// 997 ramps the motor down; 999 would stop it dead.
 	if got := fp.writtenString(); got != "\x02AG997\r" {
 		t.Errorf("wrote %q, want %q", got, "\x02AG997\r")
 	}
@@ -284,19 +285,15 @@ func TestReconnectAfterPortFailure(t *testing.T) {
 	replacement.responses["\x02A?\r"] = []byte("\x02A,?,045,R\r")
 
 	opened := 0
-	rc := &RotatorController{
-		portName: "FAKE",
-		proto:    mustProtocol("prosistel"),
-		open: func(string) (serial.Port, error) {
-			opened++
-			if opened == 1 {
-				return dead, nil
-			}
-			return replacement, nil
-		},
-	}
+	rc := newHardwareController("FAKE", mustProtocol("prosistel"), func(string) (serial.Port, error) {
+		opened++
+		if opened == 1 {
+			return dead, nil
+		}
+		return replacement, nil
+	})
 
-	h, err := rc.GetHeading()
+	h, err := rc.GetHeading(t.Context())
 	if err != nil {
 		t.Fatalf("GetHeading should succeed after reconnect: %v", err)
 	}
@@ -319,19 +316,15 @@ func TestErrorWhenReconnectAlsoFails(t *testing.T) {
 	dead.failNext = 1000
 
 	opened := 0
-	rc := &RotatorController{
-		portName: "FAKE",
-		proto:    mustProtocol("prosistel"),
-		open: func(string) (serial.Port, error) {
-			opened++
-			if opened == 1 {
-				return dead, nil
-			}
-			return nil, fmt.Errorf("device gone")
-		},
-	}
+	rc := newHardwareController("FAKE", mustProtocol("prosistel"), func(string) (serial.Port, error) {
+		opened++
+		if opened == 1 {
+			return dead, nil
+		}
+		return nil, fmt.Errorf("device gone")
+	})
 
-	if _, err := rc.GetHeading(); err == nil {
+	if _, err := rc.GetHeading(t.Context()); err == nil {
 		t.Fatal("expected error when port and reconnect both fail")
 	}
 	if rc.Connected() {
@@ -350,16 +343,12 @@ func TestStartsDisconnectedAndConnectsWhenPortAppears(t *testing.T) {
 	fp.responses["\x02A?\r"] = []byte("\x02A,?,090,R\r")
 
 	present := false
-	rc := &RotatorController{
-		portName: "FAKE",
-		proto:    mustProtocol("prosistel"),
-		open: func(string) (serial.Port, error) {
-			if !present {
-				return nil, fmt.Errorf("no such device")
-			}
-			return fp, nil
-		},
-	}
+	rc := newHardwareController("FAKE", mustProtocol("prosistel"), func(string) (serial.Port, error) {
+		if !present {
+			return nil, fmt.Errorf("no such device")
+		}
+		return fp, nil
+	})
 
 	if err := rc.Connect(); err == nil {
 		t.Fatal("Connect: expected error while the port is missing")
@@ -367,12 +356,12 @@ func TestStartsDisconnectedAndConnectsWhenPortAppears(t *testing.T) {
 	if rc.Connected() {
 		t.Error("controller should report disconnected while the port is missing")
 	}
-	if _, err := rc.GetHeading(); err == nil {
+	if _, err := rc.GetHeading(t.Context()); err == nil {
 		t.Fatal("GetHeading: expected error while the port is missing")
 	}
 
 	present = true // USB adapter finishes enumerating
-	h, err := rc.GetHeading()
+	h, err := rc.GetHeading(t.Context())
 	if err != nil {
 		t.Fatalf("GetHeading should succeed once the port appears: %v", err)
 	}
@@ -390,17 +379,13 @@ func TestStartsDisconnectedAndConnectsWhenPortAppears(t *testing.T) {
 func TestSilentControllerIsNotRetried(t *testing.T) {
 	fp := newFakePort() // port works, but nothing ever answers
 	opened := 0
-	rc := &RotatorController{
-		portName: "FAKE",
-		proto:    mustProtocol("prosistel"),
-		open: func(string) (serial.Port, error) {
-			opened++
-			return fp, nil
-		},
-	}
+	rc := newHardwareController("FAKE", mustProtocol("prosistel"), func(string) (serial.Port, error) {
+		opened++
+		return fp, nil
+	})
 
 	for i := 0; i < 2; i++ {
-		if _, err := rc.GetHeading(); !errors.Is(err, errNoResponse) {
+		if _, err := rc.GetHeading(t.Context()); !errors.Is(err, errNoResponse) {
 			t.Fatalf("GetHeading #%d: got %v, want errNoResponse", i+1, err)
 		}
 	}
@@ -420,8 +405,8 @@ func TestConnectedDoesNotWaitForLock(t *testing.T) {
 	if err := rc.Connect(); err != nil {
 		t.Fatal(err)
 	}
-	rc.mu.Lock() // a slow serial exchange is in progress
-	defer rc.mu.Unlock()
+	rc.acquire() // a slow serial exchange is in progress
+	defer rc.release()
 
 	done := make(chan bool)
 	go func() { done <- rc.Connected() }()
@@ -432,5 +417,128 @@ func TestConnectedDoesNotWaitForLock(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Connected blocked while the lock was held")
+	}
+}
+
+func TestWaitingForPortGivesUpWhenContextEnds(t *testing.T) {
+	fp := newFakePort()
+	rc := newFakeController("prosistel", fp)
+	rc.acquire() // a slow serial exchange is in progress
+	defer rc.release()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	if err := rc.SetHeading(ctx, 90); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("SetHeading: got %v, want context.DeadlineExceeded", err)
+	}
+	if err := rc.Stop(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Stop: got %v, want context.DeadlineExceeded", err)
+	}
+	if _, err := rc.GetHeading(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("GetHeading: got %v, want context.DeadlineExceeded", err)
+	}
+	if got := fp.writtenString(); got != "" {
+		t.Errorf("wrote %q after giving up, want nothing", got)
+	}
+}
+
+func TestOverlappingReadsShareOneExchange(t *testing.T) {
+	fp := newFakePort()
+	fp.responses["\x02A?\r"] = []byte("\x02A,?,123,R\r")
+	rc := newFakeController("prosistel", fp)
+
+	rc.acquire() // hold the port so the reads overlap
+	first := rc.sharedRead()
+	second := rc.sharedRead()
+	if first != second {
+		t.Fatal("a read that overlaps one in progress should share it")
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // this caller gives up; the shared read must still complete
+	if _, err := rc.GetHeading(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("GetHeading with a cancelled context: got %v, want context.Canceled", err)
+	}
+	rc.release()
+
+	<-first.done
+	if first.err != nil || first.raw != 123 {
+		t.Fatalf("shared read: got %d, %v; want 123", first.raw, first.err)
+	}
+	if got := strings.Count(fp.writtenString(), "\x02A?\r"); got != 1 {
+		t.Errorf("sent the query %d times for overlapping reads, want 1", got)
+	}
+
+	if _, err := rc.GetHeading(t.Context()); err != nil {
+		t.Fatalf("GetHeading after the shared read: %v", err)
+	}
+	if got := strings.Count(fp.writtenString(), "\x02A?\r"); got != 2 {
+		t.Errorf("a read after the shared one finished should query again; sent %d queries, want 2", got)
+	}
+}
+
+func TestRejectedCommandIsReported(t *testing.T) {
+	fp := newFakePort()
+	fp.responses["\x02AG90\r"] = []byte("\x02A,?,E,00003\r")
+	rc := newFakeController("prosistel", fp)
+	if err := rc.SetHeading(t.Context(), 90); !errors.Is(err, errRejected) {
+		t.Errorf("SetHeading: got %v, want errRejected", err)
+	}
+}
+
+func TestUnacknowledgedCommandIsReported(t *testing.T) {
+	fp := newFakePort() // the controller never answers
+	rc := newFakeController("prosistel", fp)
+	if err := rc.SetHeading(t.Context(), 90); !errors.Is(err, errNoResponse) {
+		t.Errorf("SetHeading: got %v, want errNoResponse", err)
+	}
+	if err := rc.Stop(t.Context()); !errors.Is(err, errNoResponse) {
+		t.Errorf("Stop: got %v, want errNoResponse", err)
+	}
+}
+
+// noisePort returns the same byte forever, like a line at the wrong baud
+// rate.
+type noisePort struct{ fakePort }
+
+func (*noisePort) Read(p []byte) (int, error) {
+	p[0] = 'x'
+	return 1, nil
+}
+
+func TestEndlessReplyIsRejected(t *testing.T) {
+	np := &noisePort{}
+	opened := 0
+	rc := newHardwareController("FAKE", mustProtocol("prosistel"), func(string) (serial.Port, error) {
+		opened++
+		return np, nil
+	})
+	if _, err := rc.GetHeading(t.Context()); !errors.Is(err, errBadReply) {
+		t.Fatalf("GetHeading: got %v, want errBadReply", err)
+	}
+	if opened != 1 {
+		t.Errorf("opened the port %d times, want 1 (garbage must not trigger a reconnect)", opened)
+	}
+}
+
+func TestSlowReplyIsRejected(t *testing.T) {
+	fp := newFakePort()
+	fp.pending = []byte("\x02A,?,123,R\r")
+	if _, err := readLine(fp, time.Now().Add(-time.Second)); !errors.Is(err, errBadReply) {
+		t.Errorf("readLine past its deadline: got %v, want errBadReply", err)
+	}
+}
+
+func TestClosedControllerDoesNotReopenPort(t *testing.T) {
+	opened := 0
+	rc := newHardwareController("FAKE", mustProtocol("prosistel"), func(string) (serial.Port, error) {
+		opened++
+		return newFakePort(), nil
+	})
+	rc.Close()
+	if _, err := rc.GetHeading(t.Context()); !errors.Is(err, errClosed) {
+		t.Errorf("GetHeading after Close: got %v, want errClosed", err)
+	}
+	if opened != 0 {
+		t.Errorf("opened the port %d times after Close, want 0", opened)
 	}
 }

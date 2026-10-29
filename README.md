@@ -22,7 +22,7 @@ Commercial, remotely controlled rotator systems are often expensive and tightly 
 - **Open & extensible:** integrate with homebrew hardware, existing apps, or scripts
 - **Networked control:** expose a standard API for remote control and automation
 - **Automation-friendly:** ideal for azimuth-only satellite tracking, scheduled direction changes, or contests
-- **Robust serial handling:** serialized port access, automatic reconnect after USB glitches, stale-byte flushing
+- **Robust serial handling:** serialized port access, automatic reconnect after USB glitches, stale-byte flushing, acknowledged commands, and requests that give up instead of piling up behind a silent controller
 - **Built for unattended stations:** starts even if the USB adapter isn't there yet, keeps its calibration across restarts, and ships with a systemd unit
 - **Built-in Swagger UI:** point a browser at the server and drive the API by hand
 
@@ -113,6 +113,7 @@ journalctl -u antenna-rotator-server -f     # follow the logs
 
 The unit ([`deploy/antenna-rotator-server.service`](deploy/antenna-rotator-server.service)):
 - runs as an unprivileged throwaway user in the `dialout` group, so it can open serial ports but nothing else
+- is sandboxed: read-only filesystem apart from its state directory, no capabilities, and a restricted set of system calls (check with `systemd-analyze security antenna-rotator-server`)
 - restarts automatically if the process ever exits
 - saves the calibration offset to `/var/lib/antenna-rotator-server/offset`, so it survives reboots
 
@@ -145,7 +146,10 @@ Use the **Try it out** buttons in Swagger UI to set headings, read the current h
 
 ## HTTP API
 
-Canonical paths live under `/api/v1`; the unprefixed paths remain as aliases. All endpoints return JSON. Errors come back as `{"error": "..."}` — `400` for invalid input, `502` when serial communication with the rotator fails.
+Canonical paths live under `/api/v1`; the unprefixed paths remain as aliases. All endpoints return JSON. Errors come back as `{"error": "..."}`:
+- `400`: invalid input
+- `502`: serial communication with the rotator failed, or the controller rejected the command
+- `503`: the request gave up waiting for the serial port (after 10 seconds, or as soon as the client disconnects)
 
 | Method | Path                  | Description                                          |
 |--------|-----------------------|------------------------------------------------------|
@@ -213,7 +217,11 @@ Prosistel "D" protocol, matching [Hamlib's prosistel backend](https://github.com
 | Read azimuth    | `\x02A?\r`         | `\x02A,?,<deg>,R\r`      |
 | Stop rotation   | `\x02AG997\r`      | `\x02A,?,<deg>,R\r`      |
 
-997 is a "soft" (PWM) stop; some controllers also support 999 for an immediate/fast stop. An unrecognised command gets `\x02A,?,E,<code>\r` back instead of a heading.
+The controller answers every command. The server waits for that reply after `set-heading` and `stop` too, so a command the controller rejects (`\x02A,?,E,<code>\r`) or never answers comes back as a `502` instead of a false success.
+
+**Soft start and stop.** `POST /stop` sends `G997`, Prosistel's soft stop, rather than `G999`, which always stops dead. The ramping itself is done by the control box, and only if **PWM is enabled in its setup menu**. That same setting gives every `set-heading` its soft start. With PWM off, `G997` stops dead as well, and nothing in the protocol lets the server check the setting, so confirm it on the control box.
+
+> ⚠️ Combi-Track controllers scale every angle by 10 (their soft stop is `G9777`). This protocol entry doesn't, so with a Combi-Track the stop command `G997` would be read as "go to 99.7°". Don't use it with one.
 
 ### Yaesu GS-232A/B (`ROTATOR_PROTOCOL=yaesu`)
 
@@ -229,11 +237,13 @@ Both response variants are recognised automatically, including the azimuth+eleva
 
 `XXX` is always the zero-padded 3-digit azimuth in degrees. `GET /healthz` reports the active protocol.
 
+GS-232 has no soft stop: `S` cuts the motor at once, so any ramping has to come from the control box itself.
+
 ### Adding another rotator
 
 Protocols are defined as data, not code: each one is a `ProtocolSpec` entry in the registry in [`rotator-controller/protocols.go`](rotator-controller/protocols.go) — the command templates plus the markers that precede the azimuth in the response. The serial machinery (locking, reconnect, buffer flushing) is shared. To support a new make, add one entry to that table and a few cases to `protocols_test.go`.
 
-Serial access is fully serialized (concurrent HTTP requests can't interleave commands), the input buffer is flushed before every command, and a dead port (e.g. unplugged USB adapter) is automatically reopened on the next request.
+Serial access is fully serialized (concurrent HTTP requests can't interleave commands), the input buffer is flushed before every command, and a dead port (e.g. unplugged USB adapter) is automatically reopened on the next request. Overlapping heading reads share one serial exchange, and a request waiting for the port gives up when its client disconnects or after 10 seconds, so heavy polling of a silent controller can't build a queue that delays a stop. Replies longer than 64 bytes or slower than 5 seconds are rejected as garbage (usually a baud rate mismatch).
 
 ---
 

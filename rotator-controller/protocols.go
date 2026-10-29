@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -20,7 +21,19 @@ type ProtocolSpec struct {
 	// the azimuth digits are read from just after the first marker found
 	// (or from the start of the response if none match).
 	AzimuthMarkers []string
+
+	// Acknowledges is set when the controller answers set-heading and stop
+	// with a reply line. The reply is read and checked, so a command the
+	// controller rejects is reported instead of assumed to have worked.
+	Acknowledges bool
+
+	// ErrorMarker, when found in any reply, means the controller rejected
+	// the command.
+	ErrorMarker string
 }
+
+// errRejected means the controller answered with an error reply.
+var errRejected = errors.New("rotator rejected the command")
 
 // protocols is the registry of supported rotator protocols.
 var protocols = []ProtocolSpec{
@@ -32,14 +45,24 @@ var protocols = []ProtocolSpec{
 		// bus address.
 		//   Set azimuth : \x02AG<deg>\r → "\x02A,?,<deg>,R\r"
 		//   Get azimuth : \x02A?\r      → "\x02A,?,<deg>,R\r"
-		//   Stop        : \x02AG997\r   → "\x02A,?,<deg>,R\r" (997 = soft/PWM
-		//                                 stop; 999 = fast/immediate stop)
+		//   Stop        : \x02AG997\r   → "\x02A,?,<deg>,R\r"
 		// An unrecognised command gets "\x02A,?,E,<code>\r" back instead.
+		//
+		// 997 is the soft stop: the controller ramps the motor down with PWM,
+		// but only if PWM is enabled in its setup menu; otherwise it stops
+		// dead. 999 always stops dead, so it is deliberately not used. The
+		// same PWM setting gives set-heading its soft start.
+		//
+		// Combi-Track controllers scale every angle by 10 (soft stop is
+		// 9777), so this entry must not be used with one: 997 would be read
+		// as "go to 99.7°".
 		Name:           "prosistel",
 		SetHeadingFmt:  "\x02AG%d\r",
 		GetHeadingCmd:  "\x02A?\r",
 		StopCmd:        "\x02AG997\r",
 		AzimuthMarkers: []string{",?,"},
+		Acknowledges:   true,
+		ErrorMarker:    ",E,",
 	},
 	{
 		// Yaesu GS-232A/B command set, used by the G-450/G-650/G-800/
@@ -47,6 +70,8 @@ var protocols = []ProtocolSpec{
 		//   Set azimuth : MXXX\r → —
 		//   Get azimuth : C\r    → "+0XXX" (GS-232A) or "AZ=XXX" (GS-232B)
 		//   Stop        : S\r    → —
+		// S cuts the motor at once. Any soft stop comes from the control box
+		// itself; GS-232 has no command for one.
 		// Az/el units answer with "+0XXX+0YYY" or "AZ=XXX  EL=YYY"; the
 		// leading-digit-run parse ignores the elevation part.
 		Name:           "yaesu-gs232",
@@ -93,12 +118,24 @@ func (p ProtocolSpec) setHeadingCmd(deg int) string {
 	return fmt.Sprintf(p.SetHeadingFmt, deg)
 }
 
+// checkReply reports an error if the controller answered with its error
+// marker.
+func (p ProtocolSpec) checkReply(resp string) error {
+	if p.ErrorMarker != "" && strings.Contains(resp, p.ErrorMarker) {
+		return fmt.Errorf("%w: replied %q", errRejected, resp)
+	}
+	return nil
+}
+
 // parseHeading extracts the azimuth from a get-heading response: skip past
 // the first azimuth marker present, then read the leading run of digits.
 func (p ProtocolSpec) parseHeading(resp string) (int, error) {
 	s := strings.TrimSpace(resp)
 	if s == "" {
 		return 0, fmt.Errorf("empty response from rotator")
+	}
+	if err := p.checkReply(s); err != nil {
+		return 0, err
 	}
 	for _, m := range p.AzimuthMarkers {
 		if i := strings.Index(s, m); i >= 0 {

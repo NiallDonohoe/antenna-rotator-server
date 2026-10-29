@@ -12,8 +12,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+// rotatorTimeout caps how long a request waits for the rotator, including
+// queueing behind other requests for the serial port. It sits inside the
+// HTTP WriteTimeout so the error still reaches the client.
+const rotatorTimeout = 10 * time.Second
 
 //go:embed static
 var staticFS embed.FS
@@ -21,9 +27,9 @@ var staticFS embed.FS
 // Rotator is the surface the HTTP layer needs from a rotator controller.
 // *controller.RotatorController implements it; tests substitute fakes.
 type Rotator interface {
-	SetHeading(deg int) error
-	GetHeading() (int, error)
-	Stop() error
+	SetHeading(ctx context.Context, deg int) error
+	GetHeading(ctx context.Context) (int, error)
+	Stop(ctx context.Context) error
 	Mode() string
 	Protocol() string
 	Connected() bool
@@ -93,14 +99,24 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // writeRotatorError maps controller errors to HTTP statuses: validation
-// problems are the client's fault (400), anything else is a serial I/O
-// failure upstream of this server (502).
+// problems are the client's fault (400), giving up while waiting for the
+// serial port is 503, and anything else is a serial failure upstream of
+// this server (502).
 func writeRotatorError(w http.ResponseWriter, err error) {
-	if errors.Is(err, controller.ErrInvalidHeading) {
+	switch {
+	case errors.Is(err, controller.ErrInvalidHeading):
 		writeError(w, http.StatusBadRequest, err.Error())
-		return
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		writeError(w, http.StatusServiceUnavailable, "rotator busy: gave up waiting for the serial port")
+	default:
+		writeError(w, http.StatusBadGateway, err.Error())
 	}
-	writeError(w, http.StatusBadGateway, err.Error())
+}
+
+// rotatorContext bounds a rotator call by both the client staying connected
+// and rotatorTimeout.
+func rotatorContext(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), rotatorTimeout)
 }
 
 func New(cfg Config) *Server {
@@ -135,6 +151,11 @@ func New(cfg Config) *Server {
 func registerAPIRoutes(mux *http.ServeMux, cfg Config) {
 	rotator := cfg.Rotator
 
+	// offsetMu makes applying and saving an offset one step, so overlapping
+	// POST /offset requests can't leave the saved file disagreeing with the
+	// offset in use.
+	var offsetMu sync.Mutex
+
 	handle := func(pattern string, h http.HandlerFunc) {
 		method, path, _ := strings.Cut(pattern, " ")
 		mux.HandleFunc(method+" "+path, h)
@@ -147,7 +168,9 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := rotator.SetHeading(deg); err != nil {
+		ctx, cancel := rotatorContext(r)
+		defer cancel()
+		if err := rotator.SetHeading(ctx, deg); err != nil {
 			writeRotatorError(w, err)
 			return
 		}
@@ -155,7 +178,9 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config) {
 	})
 
 	handle("GET /get-heading", func(w http.ResponseWriter, r *http.Request) {
-		heading, err := rotator.GetHeading()
+		ctx, cancel := rotatorContext(r)
+		defer cancel()
+		heading, err := rotator.GetHeading(ctx)
 		if err != nil {
 			writeRotatorError(w, err)
 			return
@@ -164,7 +189,9 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config) {
 	})
 
 	handle("POST /stop", func(w http.ResponseWriter, r *http.Request) {
-		if err := rotator.Stop(); err != nil {
+		ctx, cancel := rotatorContext(r)
+		defer cancel()
+		if err := rotator.Stop(ctx); err != nil {
 			writeRotatorError(w, err)
 			return
 		}
@@ -181,6 +208,8 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		offsetMu.Lock()
+		defer offsetMu.Unlock()
 		rotator.SetOffset(off)
 		if cfg.SaveOffset != nil {
 			if err := cfg.SaveOffset(rotator.Offset()); err != nil {
@@ -218,7 +247,9 @@ func registerAPIRoutes(mux *http.ServeMux, cfg Config) {
 	// unlike healthz, which only reports whether the port is open. Reading
 	// also reopens a dropped port, so polling it doubles as a reconnect.
 	handle("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
-		heading, err := rotator.GetHeading()
+		ctx, cancel := rotatorContext(r)
+		defer cancel()
+		heading, err := rotator.GetHeading(ctx)
 		if err != nil {
 			writeJSON(w, http.StatusServiceUnavailable, readyBody{Status: "unavailable", Error: err.Error()})
 			return
