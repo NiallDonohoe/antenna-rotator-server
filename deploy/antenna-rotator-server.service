@@ -13,9 +13,33 @@ Environment=ROTATOR_OFFSET_FILE=/var/lib/antenna-rotator-server/offset
 EnvironmentFile=/etc/antenna-rotator-server.env
 
 # Run as a throwaway unprivileged user that can open serial ports.
+# DynamicUser also makes the filesystem read-only apart from the
+# StateDirectory, and gives the service its own /tmp.
 DynamicUser=yes
 SupplementaryGroups=dialout
 StateDirectory=antenna-rotator-server
+UMask=0077
+
+# Sandboxing: the server only needs the network, its serial port and its
+# state directory. Check the result with:
+#   systemd-analyze security antenna-rotator-server
+# PrivateDevices must stay off, or the serial port disappears.
+CapabilityBoundingSet=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 # Come back after crashes and bad config edits without anyone on site.
 Restart=always

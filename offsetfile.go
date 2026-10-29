@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -30,7 +31,8 @@ func loadOffset(path string) (offset int, ok bool, err error) {
 }
 
 // saveOffset writes the offset to a temp file and renames it into place, so
-// a power cut mid-write can never leave a truncated file behind.
+// a power cut mid-write can never leave a truncated file behind. The
+// directory is synced afterwards so the rename itself survives a power cut.
 func saveOffset(path string, offset int) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".offset-*")
 	if err != nil {
@@ -49,5 +51,25 @@ func saveOffset(path string, offset int) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
+}
+
+// syncDir flushes a directory's entries to disk. Windows can't sync a
+// directory handle, so it's skipped there.
+func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		_ = d.Close()
+		return err
+	}
+	return d.Close()
 }

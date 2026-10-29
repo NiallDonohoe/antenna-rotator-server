@@ -135,17 +135,17 @@ func TestYaesuOverFakePort(t *testing.T) {
 	fp.responses["C\r"] = []byte("AZ=123\r")
 	rc := newFakeController("yaesu", fp)
 
-	if err := rc.SetHeading(90); err != nil {
+	if err := rc.SetHeading(t.Context(), 90); err != nil {
 		t.Fatalf("SetHeading: %v", err)
 	}
-	h, err := rc.GetHeading()
+	h, err := rc.GetHeading(t.Context())
 	if err != nil {
 		t.Fatalf("GetHeading: %v", err)
 	}
 	if h != 123 {
 		t.Errorf("GetHeading: got %d, want 123", h)
 	}
-	if err := rc.Stop(); err != nil {
+	if err := rc.Stop(t.Context()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
 	if got := fp.writtenString(); got != "M090\rC\rS\r" {
