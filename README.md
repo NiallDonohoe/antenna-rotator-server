@@ -272,3 +272,17 @@ CI (GitHub Actions) runs vet, the race-enabled test suite, and golangci-lint on 
 ├── deploy/                  # systemd unit + example env file
 └── .github/workflows/       # CI: vet, race tests, lint
 ```
+
+## License
+
+MIT; see [LICENSE](LICENSE).
+
+Compiled binaries include third-party Go modules under BSD-style licences.
+Their notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md): ship
+that file with any binary you distribute.
+
+## Trademarks
+
+This is an independent project. It is not affiliated with, endorsed by or
+supported by Pro.Sis.Tel. or Yaesu. Their names are used only to say which
+rotator controllers the software works with.
